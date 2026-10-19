@@ -1,0 +1,15 @@
+{
+  "release": "snapshot-2026-10-19",
+  "built_at": "2026-10-19T19:56:06+08:00",
+  "engine": "Godot 4.7.2",
+  "platform": "Windows x86_64",
+  "file": "长安拾遗.exe",
+  "bytes": 307480512,
+  "sha256": "6635bf8e9c5a8259adca858cf0b4baedc5c5b8c7bb05298ff6d01b424ac2bf81",
+  "gameplay_source_commit": "6df9b24086e631d486691c027c43cf9769a3eb79",
+  "validation": {
+    "logic_checks_passed": 192,
+    "standalone_settings_capture": "passed",
+    "embedded_story_videos": 5
+  }
+}

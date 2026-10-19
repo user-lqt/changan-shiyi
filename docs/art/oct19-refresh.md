@@ -38,4 +38,4 @@
 - 69 项视口点击检查通过，覆盖各章关键交互。
 - 实机截图：[`docs/screenshots/oct19-refresh/`](../screenshots/oct19-refresh/)。
 
-本轮更新工程版，未重新导出 Windows EXE。
+本轮工程更新已于 2026-10-19 重新导出 Windows EXE，成品通过 192 项逻辑检查及独立启动验证；五段剧情视频均已内嵌。[下载独立版](https://github.com/user-lqt/changan-shiyi/releases/latest) · [导出与校验记录](../releases/2026-10-19-windows.json)
