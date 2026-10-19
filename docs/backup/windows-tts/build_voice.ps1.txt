@@ -1,0 +1,20 @@
+﻿$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Speech
+$voiceRoot = Join-Path $PSScriptRoot '..\assets\audio'
+$narrator = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try {
+    $narrator.SelectVoice('Microsoft Huihui Desktop')
+    $narrator.Rate = -1
+    $narrator.Volume = 90
+    $lines = @{
+        'intro' = '夜色已深，长安工坊里只剩一盏灯。案上的手记说，借一束光，可以唤醒沉睡的纹样。找到铜镜，试着还原匣上的秘密吧。'
+        'revealed' = '光落在石壁上，三枚纹样逐一显现。山，月，水。把这个顺序记下来，也许它就是打开旧匣的线索。'
+        'complete' = '匣子打开了。一枚失落的青瓷残片，重新回到你的手中。长安的故事，正等待下一次拼合。'
+    }
+    foreach ($name in $lines.Keys) {
+        $narrator.SetOutputToWaveFile((Join-Path $voiceRoot ($name + '.wav')))
+        $narrator.Speak($lines[$name])
+        $narrator.SetOutputToNull()
+    }
+} finally { $narrator.Dispose() }
+Write-Output 'Created three Chinese narration tracks with the local speech engine.'

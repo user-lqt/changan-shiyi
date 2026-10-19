@@ -1,0 +1,6 @@
+Use case: text-localization
+Asset type: matching merchant rebuttal title graphic for an original Tang mystery game cut-in.
+Input images: Image 1 is the exact title-graphic design reference and edit target.
+Primary request: change only the Chinese lettering from "识破！" to exactly "驳回！". Retain the same explosive jagged ivory parchment burst, dark ink border, cinnabar and gold brush accents, bold confident energetic Chinese brush-calligraphy style, composition and green background. The new characters must be huge and equally legible.
+Text (verbatim): "驳回！"
+Constraints: Keep the parchment burst, palette, green chroma background and overall design unchanged. Use correct simplified Chinese 驳 and 回 followed by the fullwidth exclamation mark ！. No other writing, no person, no scenery, no logo, no watermark.

@@ -1,0 +1,17 @@
+Use case: identity-preserve / historical-scene.
+Asset type: eight full-body animation keyframes for Mina's Huxuan dance in the existing 2D game Chang'an Shiyi.
+Input image 1 is the existing Mina character identity and costume reference. Preserve her face, age, braided dark hair, gold jewelry, red embroidered fitted upper garment, teal and red skirt panels, gold patterned trim, and red boots. Keep the painterly realism and warm tavern lighting of the reference.
+
+Create ONE sprite sheet with exactly FOUR equal columns and TWO equal rows, 2048 x 1536 pixels. Every cell is 512 x 768 pixels. There must be one complete full-body figure in each cell. All eight figures are the SAME woman seen in consecutive dance poses. Show all hands, head, skirt, and both boots fully inside each cell. Maintain identical character proportions, head size, camera distance, lighting, and a shared ground line 96 percent down each cell. Leave empty margins. No perspective camera changes.
+
+Read the sequence LEFT TO RIGHT across row 1, then LEFT TO RIGHT across row 2. These are consecutive 45-degree steps of one upright dance turn around her VERTICAL body axis, never a cartwheel or a tilted flat card.
+Cell 1: front view, elegant opening stance, arms softly opened with curved wrists, skirt just beginning to flare.
+Cell 2: front-right three-quarter view, stepping into the turn, arms lifted gracefully, skirt following her momentum.
+Cell 3: right profile, active pivot on one foot, second foot close to the ground, arms open in a coordinated dance pose.
+Cell 4: back-right three-quarter view, flowing braids and skirt reveal the direction of rotation.
+Cell 5: full back view, both shoulders and costume back visible, skirt fanned into a broad but contained bell silhouette.
+Cell 6: back-left three-quarter view, sustained upright spin with graceful arms.
+Cell 7: left profile, turn continuing, skirt and cloth hems sweeping naturally.
+Cell 8: front-left three-quarter view, smoothly approaching the front opening pose to form a seamless loop.
+
+Backdrop: absolutely flat uniform vivid magenta RGB 255,0,255 in EVERY cell and between figures, intended for chroma-key extraction. No checkerboard, no scenery, no shadows on the magenta background, no floor, no stage, no text, no numbers, no cell borders, no watermark. Do not use magenta in the character clothing. Keep fingers anatomically coherent. Do not add people, instruments, or props. No motion-blur duplicates within a cell. Provide crisp clean character edges and finely detailed consistent embroidery.

@@ -1,0 +1,1141 @@
+extends Control
+## A complete small point-and-click puzzle. All coordinates use the 1440x900 canvas.
+
+const ROOM := Rect2(38, 170, 1074, 604)
+const SIDE := Rect2(1136, 170, 266, 700)
+const SAVE_PATH := "user://workshop_save.json"
+const GOLD := Color("d7b77b")
+const PAPER := Color("ece1c8")
+const MUTED := Color("9dada4")
+const JADE := Color("75b7a8")
+const INK := Color("111e20")
+const SYMBOLS := ["山", "月", "水", "日", "木", "云"]
+const ANSWER := [0, 1, 2]
+const MIRROR := Vector2(603, 504)
+const TARGET := Vector2(704, 379)
+const LAMP := Vector2(286, 505)
+
+var face: Font
+var art: Texture2D
+var age := 0.0
+var screen := "title"
+var modal := ""
+var mirror_found := false
+var mirror_placed := false
+var note_read := false
+var revealed := false
+var cabinet_open := false
+var completed := false
+var angle_step := 0
+var dials := [3, 4, 5]
+var selected_item := false
+var hint_level := 0
+var sound_on := true
+var toast := ""
+var toast_time := 0.0
+var toast_duration := 0.0
+var beam_flash := 0.0
+var hit_regions: Array[Dictionary] = []
+var motes: Array[Vector3] = []
+var tracks := {}
+var ambient: AudioStreamPlayer
+var speech: AudioStreamPlayer
+var sound_players: Array[AudioStreamPlayer] = []
+var test_mode := false
+var transient_save := false
+var capture_path := ""
+var capture_stage := ""
+var old_hover := ""
+var journal_pulse := 0.0
+# Additional art and feel layers.
+var title_art: Texture2D
+var paper_art: Texture2D
+var mirror_art: Texture2D
+var shard_art: Texture2D
+var rain_player: AudioStreamPlayer
+var fade := 0.0               # full-screen fade from black after screen changes
+var modal_t := 1.0            # 0 → 1 pop-in of the current panel
+var lid_t := 0.0              # casket lid opening animation
+var shake := 0.0              # seal panel shake after a wrong attempt
+var angle_vis := 0.0          # smoothed mirror angle used for drawing
+var dial_flip := [0.0, 0.0, 0.0]
+var play_time := 0.0
+var ripples: Array[Vector3] = []   # x, y, age
+var rain: Array[Vector3] = []
+const WINDOW := Rect2(132, 214, 130, 186)   # painted lattice window, canvas coordinates
+const LANTERNS := [Vector2(420, 238), Vector2(1057, 439)]
+
+
+func _ready() -> void:
+	face = load("res://assets/fonts/ui.ttc") as Font
+	if ResourceLoader.exists("res://assets/images/workshop.png"):
+		art = load("res://assets/images/workshop.png") as Texture2D
+	title_art = _try_load("res://assets/images/title.jpg")
+	paper_art = _try_load("res://assets/images/paper.jpg")
+	mirror_art = _try_load("res://assets/images/mirror.png")
+	shard_art = _try_load("res://assets/images/shard.png")
+	var args := OS.get_cmdline_user_args()
+	test_mode = args.has("--self-test") or args.has("--ui-test")
+	transient_save = test_mode or args.has("--fresh")
+	for arg in args:
+		if arg.begins_with("--capture="):
+			capture_path = arg.trim_prefix("--capture=")
+		if arg.begins_with("--stage="):
+			capture_stage = arg.trim_prefix("--stage=")
+	if not capture_path.is_empty():
+		transient_save = true
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 9173
+	for i in range(42):
+		motes.append(Vector3(rng.randf_range(0, 1074), rng.randf_range(0, 604), rng.randf_range(0.4, 1.6)))
+	for i in range(140):
+		rain.append(Vector3(rng.randf(), rng.randf(), rng.randf_range(0.6, 1.4)))
+	_prepare_audio()
+	if not transient_save:
+		_load_progress()
+	angle_vis = float(angle_step)
+	lid_t = 1.0 if cabinet_open else 0.0
+	if args.has("--ui-test"):
+		_run_ui_test.call_deferred()
+	elif test_mode:
+		_run_self_test.call_deferred()
+	elif not capture_path.is_empty():
+		_capture.call_deferred()
+	queue_redraw()
+
+
+func _try_load(path: String) -> Texture2D:
+	return load(path) as Texture2D if ResourceLoader.exists(path) else null
+
+
+func _prepare_audio() -> void:
+	for track in ["ambient", "rain", "click", "hover", "pickup", "place", "rotate", "dial", "note", "error", "reveal", "unlock", "win", "intro", "revealed", "complete"]:
+		var file := "res://assets/audio/%s.wav" % track
+		if ResourceLoader.exists(file):
+			tracks[track] = load(file)
+	ambient = AudioStreamPlayer.new()
+	ambient.volume_db = -13
+	add_child(ambient)
+	if tracks.has("ambient"):
+		ambient.stream = tracks["ambient"]
+		ambient.finished.connect(func() -> void:
+			if sound_on:
+				ambient.play())
+		ambient.play()
+	rain_player = AudioStreamPlayer.new()
+	rain_player.volume_db = -20
+	add_child(rain_player)
+	if tracks.has("rain"):
+		rain_player.stream = tracks["rain"]
+		rain_player.finished.connect(func() -> void:
+			if sound_on:
+				rain_player.play())
+		rain_player.play()
+	speech = AudioStreamPlayer.new()
+	speech.volume_db = -3
+	add_child(speech)
+	for i in range(6):
+		var player := AudioStreamPlayer.new()
+		player.volume_db = -6
+		add_child(player)
+		sound_players.append(player)
+
+
+func _sfx(name: String) -> void:
+	if not sound_on or not tracks.has(name) or test_mode:
+		return
+	for player in sound_players:
+		if not player.playing:
+			player.stream = tracks[name]
+			player.play()
+			return
+
+
+func _narrate(name: String) -> void:
+	if sound_on and tracks.has(name) and not test_mode:
+		speech.stream = tracks[name]
+		speech.play()
+
+
+func _process(delta: float) -> void:
+	age += delta
+	if screen == "game" and not completed:
+		play_time += delta
+	toast_time = maxf(0.0, toast_time - delta)
+	beam_flash = maxf(0.0, beam_flash - delta)
+	journal_pulse = maxf(0.0, journal_pulse - delta)
+	fade = maxf(0.0, fade - delta * 1.6)
+	modal_t = minf(1.0, modal_t + delta * 5.0)
+	shake = maxf(0.0, shake - delta * 2.5)
+	lid_t = move_toward(lid_t, 1.0 if cabinet_open else 0.0, delta * 1.4)
+	angle_vis = lerpf(angle_vis, float(angle_step), minf(1.0, delta * 12.0))
+	for i in range(3):
+		dial_flip[i] = maxf(0.0, float(dial_flip[i]) - delta * 4.0)
+	for i in range(ripples.size() - 1, -1, -1):
+		ripples[i].z += delta
+		if ripples[i].z > 0.6:
+			ripples.remove_at(i)
+	queue_redraw()
+
+
+func _set_modal(name: String) -> void:
+	if name != modal:
+		modal_t = 0.0 if not name.is_empty() else 1.0
+	modal = name
+
+
+func _draw() -> void:
+	hit_regions.clear()
+	draw_rect(Rect2(0, 0, 1440, 900), Color("0c1619"))
+	draw_rect(Rect2(0, 0, 1440, 142), Color("111e20"))
+	_t(Vector2(40, 34), "CHANG’AN  /  THE LOST ARCHIVE", 13, GOLD)
+	_t(Vector2(38, 90), "长安拾遗", 40, PAPER)
+	draw_line(Vector2(234, 55), Vector2(234, 100), Color("3d514b"), 1)
+	_t(Vector2(254, 74), "镜照工坊", 22, PAPER)
+	_t(Vector2(254, 100), "一束光，一枚纹样，一段等待被找回的故事。", 13, MUTED)
+	_button("sound", Rect2(1166, 52, 104, 36), "声音 · 开" if sound_on else "声音 · 关", false, 13)
+	_button("help", Rect2(1282, 52, 120, 36), "操作说明", false, 13)
+	_t(Vector2(40, 142), "第一章  /  夜访旧工坊", 13, MUTED)
+	_t(Vector2(1160, 142), "探索 · 观察 · 推理", 13, GOLD)
+	_draw_room()
+	_draw_sidebar()
+	_draw_inventory()
+	_t(Vector2(40, 892), "CHANG’AN SHIYI  ·  可玩原型 0.2   /   图像、音乐、旁白与解谜交互", 11, Color("6f837c"))
+	if screen == "title":
+		_draw_title()
+	if not modal.is_empty():
+		_draw_modal()
+	if not toast.is_empty() and toast_time > 0:
+		_draw_toast()
+	for r in ripples:
+		var k := r.z / 0.6
+		draw_arc(Vector2(r.x, r.y), 6 + k * 26, 0, TAU, 32, Color(0.95, 0.85, 0.6, (1.0 - k) * 0.55), 1.5, true)
+	if fade > 0:
+		draw_rect(Rect2(0, 0, 1440, 900), Color(0.01, 0.02, 0.025, minf(1.0, fade)))
+
+
+func _draw_room() -> void:
+	_box(ROOM.grow(1), Color("253d37"), 15)
+	if art:
+		draw_texture_rect_region(art, ROOM, _cover_crop(art.get_size(), ROOM.size))
+	else:
+		draw_rect(ROOM, Color("293c3a"))
+	for i in range(15):
+		var alpha := 0.014 + float(i) * 0.001
+		draw_rect(Rect2(ROOM.position + Vector2(0, i * 9), Vector2(ROOM.size.x, 9)), Color(0.02, 0.05, 0.05, alpha))
+	# Light rain seen through the lattice window.
+	for d in rain:
+		var y := fmod(d.y + age * 0.9 * d.z, 1.0)
+		var top := WINDOW.position + Vector2(d.x * WINDOW.size.x, y * WINDOW.size.y)
+		var bottom := top + Vector2(-2.5, 11.0 * d.z)
+		if bottom.y < WINDOW.end.y:
+			draw_line(top, bottom, Color(0.75, 0.86, 0.9, 0.16 * d.z), 1.0, true)
+	# Breathing glow on the painted lanterns.
+	for i in range(LANTERNS.size()):
+		var flick := 0.5 + 0.5 * sin(age * (3.1 + i) + i * 2.0) * sin(age * 7.3 + i)
+		for r in range(6, 0, -1):
+			draw_circle(LANTERNS[i], r * 9, Color(1, 0.7, 0.3, 0.005 + flick * 0.004))
+	for m in motes:
+		var p := ROOM.position + Vector2(fmod(m.x + age * 5.0 * m.z, ROOM.size.x), fmod(m.y - age * 4.0 * m.z + 2000.0, ROOM.size.y))
+		draw_circle(p, m.z * 0.9, Color(1, 0.84, 0.57, 0.11 + sin(age * 0.4 + m.x) * 0.06))
+	_draw_lamp()
+	_draw_stand()
+	_draw_mural()
+	_draw_casket()
+	# A small paper note sits on the painted worktable.
+	var paper_points := PackedVector2Array([Vector2(186, 566), Vector2(235, 557), Vector2(253, 576), Vector2(203, 586)])
+	draw_colored_polygon(paper_points, Color("c9bb96"))
+	for i in range(3):
+		draw_line(Vector2(202, 567 + i * 4), Vector2(235, 561 + i * 4), Color("6d6a51"), 1, true)
+	if mirror_placed:
+		_draw_light()
+	if not mirror_found:
+		var a := Vector2(353, 573)
+		# Soft glint so the small mirror reads against the busy table.
+		var glint := 0.5 + 0.5 * sin(age * 2.4)
+		draw_circle(a, 30, Color(1, 0.85, 0.5, 0.05 + glint * 0.05))
+		if mirror_art:
+			draw_set_transform(a, -0.25)
+			draw_texture_rect(mirror_art, Rect2(-24, -24, 48, 48), false)
+			draw_set_transform(Vector2.ZERO)
+		else:
+			draw_set_transform(a, -0.25)
+			draw_circle(Vector2.ZERO, 23, Color("a7834e"))
+			draw_circle(Vector2.ZERO, 18, Color("6f958b"))
+			draw_arc(Vector2.ZERO, 15, 0, TAU, 32, GOLD, 1)
+			draw_set_transform(Vector2.ZERO)
+		var sparkle := a + Vector2(-9, -11)
+		var s := 3.0 + glint * 4.0
+		draw_line(sparkle - Vector2(s, 0), sparkle + Vector2(s, 0), Color(1, 0.96, 0.8, glint * 0.8), 1.2, true)
+		draw_line(sparkle - Vector2(0, s), sparkle + Vector2(0, s), Color(1, 0.96, 0.8, glint * 0.8), 1.2, true)
+	if screen != "title" and modal.is_empty():
+		_hotspot("note", Vector2(219, 549), "案上手记", Rect2(170, 532, 113, 90))
+		if not mirror_found:
+			_hotspot("pickup", Vector2(353, 544), "拾起铜镜", Rect2(310, 530, 100, 115))
+		if not mirror_placed:
+			_hotspot("stand", MIRROR + Vector2(0, 20), "空镜台", Rect2(552, 465, 100, 176))
+		elif not revealed:
+			_t(Vector2(415, 710), "转动铜镜，让光束落在石壁圆盘上", 14, PAPER)
+			_button("turn_left", Rect2(433, 724, 92, 34), "A  左转", false, 13)
+			_button("turn_right", Rect2(642, 724, 92, 34), "右转  D", false, 13)
+			_t(Vector2(552, 747), "%d°" % ((angle_step - 4) * 15), 15, GOLD)
+		_hotspot("mural", TARGET + Vector2(0, -70), "显影石壁" if not revealed else "纹样 · 山 月 水", Rect2(TARGET - Vector2(81, 76), Vector2(163, 155)))
+		_hotspot("chest", Vector2(984, 475), "开启旧匣" if not cabinet_open else "取得残片", Rect2(888, 464, 178, 183))
+	var title_box := Rect2(ROOM.position + Vector2(16, 16), Vector2(193, 32))
+	_box(title_box, Color(0.04, 0.09, 0.09, 0.82), 5)
+	_t(title_box.position + Vector2(12, 22), "旧工坊  /  戌时 · 微雨", 12, PAPER)
+
+
+func _cover_crop(size: Vector2, target: Vector2) -> Rect2:
+	var scale_factor := maxf(target.x / size.x, target.y / size.y)
+	var use := target / scale_factor
+	return Rect2((size - use) * 0.5, use)
+
+
+func _draw_lamp() -> void:
+	for r in range(9, 0, -1):
+		draw_circle(LAMP, r * 7, Color(1, 0.66, 0.24, 0.006))
+	draw_circle(LAMP, 7 + sin(age * 5) * 0.8, Color("ffe7a3"))
+	draw_circle(LAMP, 3, Color("fffbde"))
+
+
+func _draw_stand() -> void:
+	if mirror_placed:
+		var incoming := (MIRROR - LAMP).normalized()
+		var normal := (incoming - _outgoing(angle_vis)).normalized()
+		var tangent := Vector2(-normal.y, normal.x)
+		draw_line(MIRROR - tangent * 34, MIRROR + tangent * 34, Color("5b4b35"), 12, true)
+		draw_line(MIRROR - tangent * 31, MIRROR + tangent * 31, GOLD, 7, true)
+		draw_line(MIRROR - tangent * 27, MIRROR + tangent * 27, Color("cae0cc"), 3, true)
+	else:
+		draw_arc(MIRROR, 29, 0, TAU, 32, Color(0.9, 0.78, 0.5, 0.35), 2, true)
+		draw_line(MIRROR + Vector2(-16, 0), MIRROR + Vector2(16, 0), Color(0.9, 0.78, 0.5, 0.25), 1)
+
+
+func _draw_mural() -> void:
+	draw_circle(TARGET, 65, Color(0.06, 0.09, 0.08, 0.2 if revealed else 0.08))
+	draw_arc(TARGET, 58, 0, TAU, 64, Color(0.8, 0.7, 0.45, 0.6 if revealed else 0.18), 1.5, true)
+	if revealed:
+		# Glyphs surface one after another while the reveal flash plays.
+		var k := 1.0 - beam_flash / 2.0 if beam_flash > 0 else 1.0
+		for i in range(3):
+			var a := clampf(k * 3.0 - i * 0.8, 0.0, 1.0)
+			var c := Color("f5d599")
+			c.a = a
+			_glyph(TARGET + Vector2((i - 1) * 35, (1.0 - a) * 6), i, 13, c)
+		for r in range(5, 0, -1):
+			draw_circle(TARGET, 66 + r * 4, Color(1, 0.8, 0.4, 0.009))
+	else:
+		_glyph(TARGET, 1, 24, Color(0.85, 0.8, 0.62, 0.16))
+
+
+func _draw_casket() -> void:
+	var p := Vector2(925, 481)
+	if lid_t > 0.0:
+		var e := ease(lid_t, -2.0)
+		# Dark interior first, then the lid lifts and slides back.
+		_box(Rect2(p + Vector2(1, 5), Vector2(153, 37)), Color("12211d"), 3, Color("837348"))
+		if not completed and e > 0.4:
+			var glow := (e - 0.4) / 0.6
+			for r in range(6, 0, -1):
+				draw_circle(p + Vector2(76, 18), 18 + r * 7, Color(0.72, 1.0, 0.81, 0.012 * glow + 0.006 * sin(age * 2.0) * glow))
+			_shard(p + Vector2(76, 18 - 6 * glow + sin(age * 1.6) * 1.5), 0.42)
+		_box(Rect2(p + Vector2(1, 5 - 20 * e), Vector2(153, 18 + (1.0 - e) * 19)), Color("58442c"), 3, Color("a08a56"))
+	else:
+		for i in range(3):
+			var flip := float(dial_flip[i])
+			var h := 28.0 * (1.0 - flip * 0.6)
+			_box(Rect2(p + Vector2(39 + i * 23, 24 - h * 0.5), Vector2(20, h)), Color("9e8858"), 2, Color("c6ad73"))
+			if flip < 0.5:
+				_glyph(p + Vector2(49 + i * 23, 24), int(dials[i]), 7, Color("3d3929"))
+
+
+func _outgoing(step: float = -1.0) -> Vector2:
+	var s := float(angle_step) if step < 0.0 else step
+	return Vector2.from_angle(deg_to_rad(-110.0 + s * 15.0))
+
+
+func _ray_end(start: Vector2, direction: Vector2) -> Vector2:
+	var distance := 2000.0
+	if direction.x > 0.001:
+		distance = minf(distance, (ROOM.end.x - 3 - start.x) / direction.x)
+	elif direction.x < -0.001:
+		distance = minf(distance, (ROOM.position.x + 3 - start.x) / direction.x)
+	if direction.y > 0.001:
+		distance = minf(distance, (ROOM.end.y - 3 - start.y) / direction.y)
+	elif direction.y < -0.001:
+		distance = minf(distance, (ROOM.position.y + 3 - start.y) / direction.y)
+	return start + direction * distance
+
+
+func _draw_light() -> void:
+	var dir := _outgoing(angle_vis)
+	var end := TARGET if revealed else _ray_end(MIRROR, dir)
+	var shimmer := 0.85 + 0.15 * sin(age * 6.0)
+	for w in [22.0, 12.0, 5.0, 1.5]:
+		var a := (0.027 if w > 5 else 0.36) * shimmer
+		draw_line(LAMP, MIRROR, Color(1, 0.8, 0.42, a), w, true)
+		draw_line(MIRROR, end, Color(1, 0.85, 0.52, a), w, true)
+	# Motes of light travelling along both beam segments.
+	for i in range(10):
+		var k := fmod(age * 0.35 + i * 0.1, 1.0)
+		var seg_a := LAMP.lerp(MIRROR, k)
+		var seg_b := MIRROR.lerp(end, k)
+		draw_circle(seg_a, 1.6, Color(1, 0.95, 0.75, 0.5 * sin(k * PI)))
+		draw_circle(seg_b, 1.8, Color(1, 0.95, 0.75, 0.55 * sin(k * PI)))
+	# Light pool where the beam lands.
+	for r in range(5, 0, -1):
+		draw_circle(end, r * 6, Color(1, 0.85, 0.5, 0.03))
+	draw_circle(end, 4, Color(1, 0.95, 0.78, 0.7))
+	# Gentle cue that the beam is getting close to the plaque.
+	if not revealed:
+		var along := (TARGET - MIRROR).dot(dir)
+		var miss := (MIRROR + dir * maxf(0, along)).distance_to(TARGET)
+		if along > 0 and miss < 120:
+			draw_arc(TARGET, 62, 0, TAU, 64, Color(1, 0.85, 0.5, (1.0 - miss / 120.0) * 0.45), 2.0, true)
+	draw_circle(MIRROR, 6, Color("ffe8a9"))
+	if beam_flash > 0:
+		draw_circle(TARGET, 75 + (2 - beam_flash) * 65, Color(1, 0.87, 0.5, beam_flash * 0.05))
+
+
+func _draw_sidebar() -> void:
+	_box(SIDE, Color("142426"), 12, Color("2d4540"))
+	_t(SIDE.position + Vector2(23, 35), "行旅手札", 21, PAPER)
+	_t(SIDE.position + Vector2(23, 62), "先观察，再让线索彼此相连。", 12, MUTED)
+	draw_line(SIDE.position + Vector2(22, 83), SIDE.position + Vector2(244, 83), Color("344b43"))
+	var titles := ["寻镜", "借光", "解匣"]
+	var descriptions := ["在工坊中找到铜镜与手记", "将镜片安放，照亮石壁", "按纹样顺序打开旧匣"]
+	var status := [mirror_found and note_read, revealed, completed]
+	for i in range(3):
+		var y := SIDE.position.y + 114 + i * 81
+		var c: Color = JADE if status[i] else GOLD if _phase() == i else Color("718279")
+		draw_arc(Vector2(1172, y), 12, 0, TAU, 32, c, 1, true)
+		_t(Vector2(1167, y + 5), "✓" if status[i] else str(i + 1), 12, c)
+		_t(Vector2(1196, y + 5), titles[i], 18, PAPER if status[i] or _phase() == i else MUTED)
+		_t(Vector2(1160, y + 32), descriptions[i], 12, MUTED)
+	_t(Vector2(1160, 556), "已发现的线索", 13, GOLD)
+	var clues: Array[String] = []
+	if note_read:
+		clues.append("手记：引灯光照见壁上纹样。")
+	if revealed:
+		clues.append("石壁：山 → 月 → 水。")
+	if completed:
+		clues.append("青瓷残片：已收入行囊。")
+	if clues.is_empty():
+		clues.append("点击发光标记，查看物件。")
+	var cy := 587
+	for clue in clues:
+		_wrap(Vector2(1160, cy), clue, 218, 13, MUTED, 24)
+		cy += 49
+	_button("journal", Rect2(1158, 748, 222, 40), "查看手札  J", false, 14)
+	_button("hint", Rect2(1158, 801, 222, 40), "需要一点提示", false, 14)
+
+
+func _phase() -> int:
+	if revealed:
+		return 2
+	if mirror_found:
+		return 1
+	return 0
+
+
+func _draw_inventory() -> void:
+	_box(Rect2(38, 794, 1074, 76), Color("142426"), 10, Color("2d4540"))
+	_t(Vector2(59, 822), "行囊", 15, PAPER)
+	_t(Vector2(59, 847), "点击物件以使用", 11, MUTED)
+	var slot := Rect2(204, 805, 188, 54)
+	if mirror_found and not mirror_placed:
+		_box(slot, Color("2e453e") if selected_item else Color("1b302f"), 7, GOLD if selected_item else Color("3e554a"))
+		var bob := sin(age * 3.0) * 1.5 if selected_item else 0.0
+		if mirror_art:
+			draw_texture_rect(mirror_art, Rect2(slot.position + Vector2(8, 6 + bob), Vector2(40, 40)), false)
+		else:
+			draw_circle(slot.position + Vector2(28, 26), 15, GOLD)
+			draw_circle(slot.position + Vector2(28, 26), 10, JADE)
+		if selected_item:
+			draw_arc(slot.position + Vector2(28, 26 + bob), 23, 0, TAU, 32, Color(1, 0.85, 0.5, 0.4 + 0.3 * sin(age * 4.0)), 1.5, true)
+		_t(slot.position + Vector2(55, 25), "铜镜", 15, PAPER)
+		_t(slot.position + Vector2(55, 44), "已选中" if selected_item else "点击，再选择镜台", 10, GOLD if selected_item else MUTED)
+		_register("inventory", slot)
+	elif completed:
+		_box(slot, Color("1b302f"), 7, JADE)
+		_shard(slot.position + Vector2(28, 28), 0.35)
+		_t(slot.position + Vector2(55, 32), "青瓷纹样残片", 14, PAPER)
+	else:
+		_box(slot, Color("112022"), 7, Color("30433b"))
+		_t(slot.position + Vector2(21, 33), "寻找可收集的物件…" if not mirror_found else "铜镜已安放在镜台", 12, MUTED)
+	var objective := "点击场景标记，先找一找手记和铜镜。"
+	if mirror_found and not mirror_placed:
+		objective = "点击行囊中的铜镜，再点击空镜台。"
+	elif mirror_placed and not revealed:
+		objective = "A / D 或滚轮转镜，将光束引向石壁圆盘。"
+	elif revealed and not cabinet_open:
+		objective = "记住石壁纹样，试着解开右侧旧匣。"
+	elif cabinet_open and not completed:
+		objective = "旧匣已开启，点击取出其中的青瓷残片。"
+	elif completed:
+		objective = "工坊的秘密已解开。你找回了第一枚残片。"
+	_t(Vector2(422, 838), objective, 14, PAPER)
+
+
+func _draw_title() -> void:
+	hit_regions.clear()
+	_register("sound", Rect2(1166, 52, 104, 36))
+	_register("help", Rect2(1282, 52, 120, 36))
+	var full := Rect2(0, 0, 1440, 900)
+	if title_art:
+		# Slow Ken Burns drift over the AI-painted Chang'an night view.
+		var crop := _cover_crop(title_art.get_size(), full.size)
+		var zoom := 1.0 - 0.05 * (0.5 + 0.5 * sin(age * 0.05))
+		var c := Rect2(crop.position + crop.size * (1.0 - zoom) * Vector2(0.3, 0.5), crop.size * zoom)
+		draw_texture_rect_region(title_art, full, c)
+		for i in range(30):
+			draw_rect(Rect2(0, 0, 1440 - i * 30, 900), Color(0.01, 0.025, 0.03, 0.022))
+		for d in rain:
+			var y := fmod(d.y + age * 1.1 * d.z, 1.0) * 900.0
+			var x := fmod(d.x * 1440.0 + d.z * 300.0, 1440.0)
+			draw_line(Vector2(x, y), Vector2(x - 4, y + 18 * d.z), Color(0.75, 0.85, 0.9, 0.09 * d.z), 1.0, true)
+	else:
+		draw_rect(Rect2(0, 142, 1440, 758), Color(0.015, 0.03, 0.035, 0.66))
+	_t(Vector2(110, 230), "CHAPTER 01  /  镜照工坊", 14, GOLD)
+	_t(Vector2(106, 318), "长安拾遗", 72, PAPER)
+	_t(Vector2(110, 380), "借一束光，找回长安。", 30, PAPER)
+	_wrap(Vector2(112, 428), "夜深，旧工坊里只剩一盏灯。一本手记、一面铜镜、一只锁住的旧匣，正等着你将它们联系起来。", 580, 17, Color("c3cbc3"), 31)
+	_button("start", Rect2(112, 540, 240, 51), "继续探索" if mirror_found or note_read else "进入工坊", true, 19)
+	_button("new", Rect2(372, 540, 160, 51), "重新开始", false, 16)
+	_t(Vector2(112, 623), "鼠标点击 · 拾取与使用 · 旋转机关    /    约 3–5 分钟    /    Enter 开始", 12, Color("aab6ae"))
+	_button("sound", Rect2(1166, 52, 104, 36), "声音 · 开" if sound_on else "声音 · 关", false, 13)
+	_button("help", Rect2(1282, 52, 120, 36), "操作说明", false, 13)
+
+
+func _draw_modal() -> void:
+	hit_regions.clear()
+	var e := ease(modal_t, -2.0)
+	draw_rect(Rect2(0, 0, 1440, 900), Color(0.015, 0.03, 0.035, 0.82 * e))
+	# Pop-in: scale up slightly from the centre; the seal panel also shakes on a wrong answer.
+	var sc := 0.94 + 0.06 * e
+	var center := Vector2(720, 460)
+	var jolt := Vector2(sin(shake * 40.0) * shake * 14.0, 0)
+	draw_set_transform(center * (1.0 - sc) + jolt, 0.0, Vector2(sc, sc))
+	var card := Rect2(325, 185, 790, 550)
+	_box(card, Color("172b2b"), 16, Color("7f7859"))
+	_corner_ornaments(card)
+	_button("close", Rect2(1036, 205, 56, 33), "关闭", false, 12)
+	match modal:
+		"note":
+			_t(Vector2(372, 242), "线索 01  /  工匠手记", 14, GOLD)
+			_t(Vector2(372, 301), "借光，方见旧纹。", 30, PAPER)
+			var sheet := Rect2(372, 335, 695, 224)
+			if paper_art:
+				draw_texture_rect_region(paper_art, sheet, _cover_crop(paper_art.get_size(), sheet.size))
+			else:
+				_box(sheet, Color("d9c9a5"), 7)
+			var ink := Color("3a2f22")
+			var lines := ["灯不移，镜可转。", "引一线明光，照石上三纹；", "循其先后，旧匣自开。"]
+			# Handwriting appears line by line as the note opens.
+			for i in range(lines.size()):
+				ink.a = clampf(modal_t * 3.0 - i * 0.6, 0.0, 0.9)
+				_t(Vector2(408, 389 + i * 52), lines[i], 26, ink)
+			draw_circle(Vector2(1010, 520), 17, Color(0.62, 0.16, 0.12, 0.75))
+			_t(Vector2(1001, 527), "匠", 18, Color(0.95, 0.85, 0.75, 0.9))
+			_wrap(Vector2(374, 601), "手记已收入手札。先找到铜镜，安放在空镜台上，再试着让光线落在石壁的圆盘上。", 687, 17, MUTED, 30)
+			_button("close", Rect2(848, 657, 217, 43), "记下了，继续探索", true, 15)
+		"journal":
+			_t(Vector2(372, 244), "FIELD NOTES  /  行旅手札", 14, GOLD)
+			_t(Vector2(372, 303), "让线索，连成答案。", 29, PAPER)
+			_wrap(Vector2(374, 354), "工匠手记：" + ("灯不移，镜可转。将灯光引向石壁，按三枚纹样的先后开启旧匣。" if note_read else "尚未读到。点击案上的手记。"), 680, 18, MUTED, 34)
+			if revealed:
+				_t(Vector2(374, 459), "光照石壁后显现的顺序：", 18, PAPER)
+				for i in range(3):
+					_glyph(Vector2(477 + i * 160, 533), i, 28, GOLD)
+					_t(Vector2(462 + i * 160, 592), SYMBOLS[i], 20, PAPER)
+			else:
+				_t(Vector2(374, 480), "石壁纹样：尚未显现。", 18, MUTED)
+			_button("close", Rect2(849, 655, 216, 43), "回到工坊", true, 15)
+		"seal":
+			_t(Vector2(372, 244), "PUZZLE 02  /  三纹锁", 14, GOLD)
+			_t(Vector2(372, 303), "依次入纹，方启旧匣。", 29, PAPER)
+			_t(Vector2(374, 342), "点击纹样切换，按石壁上从左到右的顺序排列。", 16, MUTED)
+			for i in range(3):
+				var r := Rect2(421 + i * 191, 384, 157, 171)
+				var hover := r.has_point(get_local_mouse_position())
+				_box(r, Color("2c463e") if hover else Color("263c35"), 11, GOLD if hover else Color("8c865b"))
+				_t(r.position + Vector2(63, 29), "0%d" % (i + 1), 13, MUTED)
+				# Card flip: squash the glyph vertically while it changes.
+				var flip := float(dial_flip[i])
+				draw_set_transform(center * (1.0 - sc) + jolt + Vector2(0, (r.position.y + 83) * (1.0 - (1.0 - flip * 0.8)) * sc), 0.0, Vector2(sc, sc * (1.0 - flip * 0.8)))
+				_glyph(r.position + Vector2(79, 83), int(dials[i]), 32, GOLD)
+				draw_set_transform(center * (1.0 - sc) + jolt, 0.0, Vector2(sc, sc))
+				_t(r.position + Vector2(66, 149), SYMBOLS[int(dials[i])], 20, PAPER)
+				_register("dial_%d" % i, r)
+				_button("back_%d" % i, Rect2(r.position + Vector2(0, 184), Vector2(157, 32)), "‹ 上一纹样", false, 12)
+			_button("check", Rect2(550, 643, 340, 51), "尝试开启", true, 18)
+			if revealed:
+				_t(Vector2(374, 616), "手札记载：山 → 月 → 水", 14, JADE)
+		"mirror":
+			_t(Vector2(372, 242), "藏品图鉴  /  ARTIFACT", 14, GOLD)
+			_t(Vector2(372, 301), "海兽葡萄纹铜镜", 30, PAPER)
+			var mc := Vector2(530, 470)
+			for r in range(6, 0, -1):
+				draw_circle(mc, 110 + r * 6, Color(1, 0.8, 0.45, 0.012))
+			if mirror_art:
+				draw_set_transform(center * (1.0 - sc) + jolt + mc * sc, age * 0.08, Vector2(sc, sc))
+				draw_texture_rect(mirror_art, Rect2(-115, -115, 230, 230), false)
+				draw_set_transform(center * (1.0 - sc) + jolt, 0.0, Vector2(sc, sc))
+			_wrap(Vector2(680, 360), "唐代铜镜的代表样式。镜背以瑞兽穿行于葡萄枝蔓间，融合了丝绸之路传来的西域纹样，是盛唐长安开放气象的缩影。", 380, 16, Color("c3cbc3"), 29)
+			_wrap(Vector2(680, 510), "镜面经研磨可清晰映物。古人亦用铜镜反射日光、灯光——这正是本章机关的灵感来源。", 380, 15, MUTED, 27)
+			_button("close", Rect2(848, 657, 217, 43), "收入行囊", true, 15)
+		"win":
+			_t(Vector2(374, 245), "ARCHIVE RECOVERED  /  藏品 01", 14, GOLD)
+			var sp := Vector2(530, 450)
+			for r in range(7, 0, -1):
+				draw_circle(sp, 90 + r * 8, Color(0.72, 1.0, 0.81, 0.012 + 0.004 * sin(age * 2.0)))
+			_shard(sp + Vector2(0, sin(age * 1.4) * 4.0), 2.6)
+			_t(Vector2(680, 318), "你找回了青瓷残片", 30, PAPER)
+			_wrap(Vector2(682, 362), "越窑青瓷刻莲纹残片。唐代越窑青瓷釉色如玉，陆羽《茶经》称其“类玉”“类冰”。莲纹寓意清净，在唐代器物中十分常见。", 370, 15, Color("c3cbc3"), 27)
+			_wrap(Vector2(682, 500), "一道光连接了线索，一枚残片唤醒了故事。", 370, 16, MUTED, 27)
+			_t(Vector2(682, 575), "本章用时 %s   ·   使用提示 %d 次" % [_fmt_time(play_time), hint_level], 13, GOLD)
+			_button("close", Rect2(433, 655, 273, 50), "留在工坊", true, 17)
+			_button("restart", Rect2(731, 655, 273, 50), "再体验一次", false, 17)
+		"help":
+			_t(Vector2(374, 244), "HOW TO PLAY  /  操作说明", 14, GOLD)
+			_t(Vector2(374, 303), "慢一点，观察每一处联系。", 28, PAPER)
+			var lines := ["鼠标点击发光标记：调查、拾取或操作物件。", "点击行囊中的铜镜，再点击空镜台以安放。", "铜镜安放后，用 A / D、滚轮或按钮旋转。", "点击旧匣的纹样切换，依据线索排列后尝试开启。", "J 打开手札；H 获取分级提示；Esc 关闭面板。", "进度自动保存在本机。“重新开始”可清除本关进度。"]
+			for i in range(lines.size()):
+				_t(Vector2(375, 358 + i * 41), lines[i], 17, MUTED)
+			_button("close", Rect2(848, 657, 217, 43), "开始观察", true, 16)
+	draw_set_transform(Vector2.ZERO)
+
+
+func _corner_ornaments(r: Rect2) -> void:
+	# Small Tang-style bracket corners framing every panel.
+	var c := Color(0.84, 0.72, 0.48, 0.55)
+	for corner in [r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)]:
+		var sx := 1.0 if corner.x < r.get_center().x else -1.0
+		var sy := 1.0 if corner.y < r.get_center().y else -1.0
+		var o: Vector2 = corner + Vector2(10 * sx, 10 * sy)
+		draw_line(o, o + Vector2(26 * sx, 0), c, 1.5, true)
+		draw_line(o, o + Vector2(0, 26 * sy), c, 1.5, true)
+		draw_line(o + Vector2(5 * sx, 5 * sy), o + Vector2(14 * sx, 5 * sy), c, 1.0, true)
+		draw_line(o + Vector2(5 * sx, 5 * sy), o + Vector2(5 * sx, 14 * sy), c, 1.0, true)
+
+
+func _fmt_time(seconds: float) -> String:
+	var s := int(seconds)
+	return "%d 分 %02d 秒" % [s / 60, s % 60]
+
+
+func _draw_toast() -> void:
+	var w := minf(980, maxf(380, face.get_string_size(toast, HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x + 48))
+	var r := Rect2((1440 - w) * 0.5, 111, w, 43)
+	_box(r, Color("294b3e"), 8, Color("7a9871"))
+	_t(r.position + Vector2(24, 29), toast, 16, PAPER)
+
+
+func _shard(p: Vector2, scale_factor: float) -> void:
+	if shard_art:
+		var s := shard_art.get_size() / shard_art.get_size().x * 92.0 * scale_factor
+		draw_texture_rect(shard_art, Rect2(p - s * 0.5, s), false)
+		return
+	var points := PackedVector2Array([Vector2(-37, -36), Vector2(13, -43), Vector2(44, -8), Vector2(20, 43), Vector2(-22, 30)])
+	var scaled := PackedVector2Array()
+	for v in points:
+		scaled.append(p + v * scale_factor)
+	draw_colored_polygon(scaled, Color("82bdaf"))
+	scaled.append(scaled[0])
+	draw_polyline(scaled, Color("d4e5c2"), 2 * scale_factor, true)
+	for i in range(3):
+		draw_arc(p + Vector2(0, 4) * scale_factor, (12 + i * 9) * scale_factor, PI * 0.97, PI * 1.97, 24, Color("396b61"), 2 * scale_factor, true)
+
+
+func _glyph(p: Vector2, symbol: int, size: float, color: Color) -> void:
+	var points := PackedVector2Array()
+	match symbol:
+		0:
+			points = PackedVector2Array([Vector2(-1, 0.7), Vector2(-1, -0.3), Vector2(-0.8, 0.7), Vector2(0, 0.7), Vector2(0, -0.9), Vector2(0, 0.7), Vector2(1, 0.7), Vector2(1, -0.3)])
+		1:
+			for i in range(24):
+				var a := -PI * 0.53 + float(i) / 23.0 * PI * 1.45
+				points.append(Vector2(cos(a), sin(a)))
+			points.append(Vector2(0.05, -0.1))
+			points.append(points[0])
+		2:
+			for j in range(3):
+				var wave := PackedVector2Array()
+				for i in range(18):
+					wave.append(p + Vector2(-1.0 + i / 17.0 * 2, (j - 1) * 0.58 + sin(i / 17.0 * TAU) * 0.14) * size)
+				draw_polyline(wave, color, maxf(1.2, size * 0.09), true)
+			return
+		3:
+			draw_arc(p, size * 0.8, 0, TAU, 32, color, maxf(1.2, size * 0.1), true)
+			for i in range(8):
+				var dir := Vector2.from_angle(float(i) * TAU / 8)
+				draw_line(p + dir * size, p + dir * size * 1.25, color, maxf(1.2, size * 0.08), true)
+			return
+		4:
+			points = PackedVector2Array([Vector2(0, 1), Vector2(0, -1), Vector2(-.9, .3), Vector2(0, -.5), Vector2(.9, .3), Vector2(0, -.5)])
+		5:
+			for i in range(3):
+				draw_arc(p + Vector2((i - 1) * size * .6, 0), size * .6, PI, TAU, 20, color, maxf(1.2, size * .1), true)
+			draw_line(p + Vector2(-1.6, .3) * size, p + Vector2(1.6, .3) * size, color, maxf(1.2, size * .1), true)
+			return
+	for i in range(points.size()):
+		points[i] = p + points[i] * size
+	if points.size() > 1:
+		draw_polyline(points, color, maxf(1.2, size * 0.09), true)
+
+
+func _box(rect: Rect2, fill: Color, radius: int = 8, outline: Color = Color.TRANSPARENT) -> void:
+	var style := StyleBoxFlat.new()
+	style.bg_color = fill
+	style.set_corner_radius_all(radius)
+	if outline.a > 0:
+		style.border_color = outline
+		style.set_border_width_all(1)
+	draw_style_box(style, rect)
+
+
+func _t(p: Vector2, text: String, size: int, color: Color) -> void:
+	draw_string(face, p, text, HORIZONTAL_ALIGNMENT_LEFT, -1, size, color)
+
+
+func _wrap(p: Vector2, text: String, width: float, size: int, color: Color, line_height: float) -> void:
+	var line := ""
+	var row := 0
+	for character in text:
+		if character == "\n" or face.get_string_size(line + character, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > width:
+			_t(p + Vector2(0, row * line_height), line, size, color)
+			row += 1
+			line = "" if character == "\n" else character
+		else:
+			line += character
+	_t(p + Vector2(0, row * line_height), line, size, color)
+
+
+func _register(id: String, rect: Rect2) -> void:
+	hit_regions.append({"id": id, "rect": rect})
+
+
+func _button(id: String, rect: Rect2, caption: String, primary := false, size := 16) -> void:
+	var hover := rect.has_point(get_local_mouse_position())
+	var fill := Color("c3a365") if primary else Color("203735")
+	if hover:
+		fill = fill.lightened(0.12)
+	_box(rect, fill, 7, Color("e1c58d") if primary else Color("405b50"))
+	var tw := face.get_string_size(caption, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	_t(rect.position + Vector2((rect.size.x - tw) * .5, rect.size.y * .5 + size * .36), caption, size, INK if primary else PAPER)
+	_register(id, rect)
+
+
+func _hotspot(id: String, p: Vector2, label: String, rect: Rect2) -> void:
+	var hover := rect.has_point(get_local_mouse_position())
+	var pulse := 1.0 + sin(age * 2.0) * 0.08
+	draw_circle(p, 15 * pulse, Color(0.06, 0.14, 0.13, 0.82))
+	draw_arc(p, 12 * pulse, 0, TAU, 32, GOLD if hover else Color("c9b381"), 1.2, true)
+	draw_circle(p, 3, GOLD)
+	if hover:
+		var w := face.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x + 28
+		_box(Rect2(p + Vector2(-w * .5, -43), Vector2(w, 30)), Color("122725"), 5, Color("6f8064"))
+		_t(p + Vector2(-w * .5 + 14, -22), label, 14, PAPER)
+	_register(id, rect)
+
+
+func _gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion:
+		var hover_id := ""
+		for i in range(hit_regions.size() - 1, -1, -1):
+			if (hit_regions[i]["rect"] as Rect2).has_point(event.position):
+				hover_id = str(hit_regions[i]["id"])
+				break
+		if hover_id != old_hover and not hover_id.is_empty():
+			_sfx("hover")
+		old_hover = hover_id
+		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if not hover_id.is_empty() else Control.CURSOR_ARROW
+	elif event is InputEventMouseButton and event.pressed:
+		if event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
+			if mirror_placed and not revealed and modal.is_empty() and screen == "game":
+				_turn_mirror(1 if event.button_index == MOUSE_BUTTON_WHEEL_UP else -1)
+			return
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			for i in range(hit_regions.size() - 1, -1, -1):
+				if (hit_regions[i]["rect"] as Rect2).has_point(event.position):
+					ripples.append(Vector3(event.position.x, event.position.y, 0.0))
+					_act(str(hit_regions[i]["id"]))
+					accept_event()
+					return
+			# Clicking empty scenery still gives a light acknowledgement.
+			if screen == "game" and modal.is_empty() and ROOM.has_point(event.position):
+				ripples.append(Vector3(event.position.x, event.position.y, 0.3))
+
+
+func _unhandled_key_input(event: InputEvent) -> void:
+	if not event is InputEventKey or not event.pressed or event.echo:
+		return
+	if event.keycode == KEY_ESCAPE:
+		_set_modal("" if not modal.is_empty() else "help")
+		_sfx("click")
+	elif screen == "title" and event.keycode in [KEY_ENTER, KEY_SPACE]:
+		_act("start")
+	elif screen == "game" and not modal.is_empty() and event.keycode in [KEY_ENTER, KEY_SPACE]:
+		if modal == "seal":
+			_act("check")
+		else:
+			_act("close")
+	elif screen == "game" and modal == "seal":
+		match event.keycode:
+			KEY_1, KEY_2, KEY_3:
+				_act("dial_%d" % (event.keycode - KEY_1))
+	elif screen == "game" and modal.is_empty():
+		match event.keycode:
+			KEY_A, KEY_LEFT:
+				_turn_mirror(-1)
+			KEY_D, KEY_RIGHT:
+				_turn_mirror(1)
+			KEY_J:
+				_act("journal")
+			KEY_H:
+				_act("hint")
+	queue_redraw()
+
+
+func _act(id: String) -> void:
+	if not id.begins_with("dial_") and not id.begins_with("back_"):
+		_sfx("click")
+	match id:
+		"sound":
+			sound_on = not sound_on
+			AudioServer.set_bus_mute(0, not sound_on)
+			if sound_on:
+				if tracks.has("ambient") and not ambient.playing:
+					ambient.play()
+				if tracks.has("rain") and not rain_player.playing:
+					rain_player.play()
+		"help":
+			_set_modal("help")
+		"start":
+			screen = "game"
+			fade = 1.0
+			if not mirror_found:
+				_narrate("intro")
+		"new", "restart":
+			_reset_progress()
+			screen = "game"
+			fade = 1.0
+			_narrate("intro")
+		"close":
+			_set_modal("")
+		"note":
+			note_read = true
+			_set_modal("note")
+			_sfx("note")
+			_save_progress()
+		"pickup":
+			if not mirror_found:
+				mirror_found = true
+				selected_item = true
+				_set_modal("mirror")
+				_notify("获得铜镜。点击空镜台，将它安放上去。")
+				_sfx("pickup")
+				_save_progress()
+		"inventory":
+			selected_item = not selected_item
+		"stand":
+			if not mirror_found:
+				_notify("镜台空着。也许附近能找到合适的铜镜。")
+			elif not selected_item:
+				_notify("先点击行囊中的铜镜，再将它安放在这里。")
+			else:
+				_place_mirror()
+		"turn_left":
+			_turn_mirror(-1)
+		"turn_right":
+			_turn_mirror(1)
+		"mural":
+			if revealed:
+				_set_modal("journal")
+			else:
+				_notify("石壁上有浅浅刻痕。也许需要更准确的一束光。")
+		"chest":
+			if cabinet_open:
+				_finish()
+			else:
+				_set_modal("seal")
+		"check":
+			_check_seal()
+		"journal":
+			_set_modal("journal")
+		"hint":
+			_hint()
+		_:
+			if id.begins_with("dial_"):
+				var i := int(id.trim_prefix("dial_"))
+				dials[i] = (int(dials[i]) + 1) % 6
+				dial_flip[i] = 1.0
+				_sfx("dial")
+				_save_progress()
+			elif id.begins_with("back_"):
+				var i := int(id.trim_prefix("back_"))
+				dials[i] = posmod(int(dials[i]) - 1, 6)
+				dial_flip[i] = 1.0
+				_sfx("dial")
+				_save_progress()
+	queue_redraw()
+
+
+func _place_mirror() -> void:
+	if not mirror_found or mirror_placed:
+		return
+	mirror_placed = true
+	selected_item = false
+	angle_vis = float(angle_step)
+	_sfx("place")
+	_notify("铜镜已安放。用 A / D 或滚轮调整光线。")
+	_save_progress()
+
+
+func _turn_mirror(direction: int) -> void:
+	if not mirror_placed or revealed:
+		return
+	angle_step = posmod(angle_step + direction, 11)
+	_sfx("rotate")
+	var ray := _outgoing()
+	var along := (TARGET - MIRROR).dot(ray)
+	var closest := MIRROR + ray * maxf(0, along)
+	if along > 0 and closest.distance_to(TARGET) < 29:
+		revealed = true
+		beam_flash = 2.0
+		journal_pulse = 3.0
+		_notify("光照见了三枚纹样：山 → 月 → 水。线索已记入手札。", 6)
+		_sfx("reveal")
+		_narrate("revealed")
+	_save_progress()
+
+
+func _check_seal() -> void:
+	if not revealed:
+		_notify("先让石壁纹样显现，找到开启旧匣的依据。")
+		_sfx("error")
+		shake = 1.0
+		return
+	if dials == ANSWER:
+		cabinet_open = true
+		lid_t = 0.0
+		_set_modal("")
+		_notify("机关轻响，旧匣已开启。点击取出青瓷残片。", 5)
+		_sfx("unlock")
+		_save_progress()
+	else:
+		_notify("纹样尚未吻合。按石壁从左到右的顺序再试一次。")
+		_sfx("error")
+		shake = 1.0
+
+
+func _finish() -> void:
+	if not cabinet_open:
+		return
+	completed = true
+	_set_modal("win")
+	_sfx("win")
+	_narrate("complete")
+	_save_progress()
+
+
+func _notify(message: String, duration := 4.0) -> void:
+	toast = message
+	toast_time = duration
+	toast_duration = duration
+
+
+func _hint() -> void:
+	hint_level += 1
+	var message := ""
+	if not mirror_found:
+		message = "看看左侧案上的手记，再找找桌边那面小铜镜。"
+	elif not mirror_placed:
+		message = "点击行囊中的铜镜，再点击画面中央的空镜台。"
+	elif not revealed:
+		message = "光应落在右上方圆盘。" + ("从最初角度向右转四次。" if hint_level > 2 else "试着慢慢向右转动镜片。")
+	elif not cabinet_open:
+		message = "按从左到右的顺序：山 → 月 → 水，调整旧匣上的三枚纹样。"
+	else:
+		message = "旧匣已经打开。点击匣中的青瓷残片，完成本章。"
+	_notify(message, 6)
+
+
+func _save_progress() -> void:
+	if transient_save:
+		return
+	var data := {"version": 1, "mirror_found": mirror_found, "mirror_placed": mirror_placed, "note_read": note_read, "revealed": revealed, "cabinet_open": cabinet_open, "completed": completed, "angle_step": angle_step, "dials": dials}
+	var file := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if file:
+		file.store_string(JSON.stringify(data))
+
+
+func _load_progress() -> void:
+	if not FileAccess.file_exists(SAVE_PATH):
+		return
+	var data = JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
+	if not data is Dictionary or int(data.get("version", 0)) != 1:
+		return
+	mirror_found = bool(data.get("mirror_found", false))
+	mirror_placed = mirror_found and bool(data.get("mirror_placed", false))
+	note_read = bool(data.get("note_read", false))
+	revealed = mirror_placed and bool(data.get("revealed", false))
+	cabinet_open = revealed and bool(data.get("cabinet_open", false))
+	completed = cabinet_open and bool(data.get("completed", false))
+	angle_step = clampi(int(data.get("angle_step", 0)), 0, 10)
+	var stored = data.get("dials", [3, 4, 5])
+	if stored is Array and stored.size() == 3:
+		for i in range(3):
+			dials[i] = posmod(int(stored[i]), 6)
+
+
+func _reset_progress() -> void:
+	mirror_found = false
+	mirror_placed = false
+	note_read = false
+	revealed = false
+	cabinet_open = false
+	completed = false
+	angle_step = 0
+	dials = [3, 4, 5]
+	selected_item = false
+	modal = ""
+	hint_level = 0
+	play_time = 0.0
+	lid_t = 0.0
+	angle_vis = 0.0
+	toast_time = 0
+	speech.stop()
+	_save_progress()
+
+
+func _expect(condition: bool, label: String) -> void:
+	if not condition:
+		push_error("FAIL: " + label)
+		get_tree().quit(1)
+		assert(condition, label)
+	print("PASS: " + label)
+
+
+func _run_self_test() -> void:
+	_reset_progress()
+	_expect(not mirror_found and not revealed and not completed, "new game has clean progress")
+	_act("stand")
+	_expect(not mirror_placed, "empty inventory cannot place mirror")
+	dials = ANSWER.duplicate()
+	_check_seal()
+	_expect(not cabinet_open, "seal needs discovered evidence even with correct symbols")
+	_act("note")
+	_act("close")
+	_expect(note_read, "note becomes persistent clue")
+	_act("pickup")
+	_expect(mirror_found and selected_item, "collect mirror and select inventory")
+	_act("stand")
+	_expect(mirror_placed and not selected_item, "mirror used on correct stand")
+	_turn_mirror(1)
+	_expect(not revealed, "incorrect beam angle does not reveal clue")
+	for i in range(3):
+		_turn_mirror(1)
+	_expect(revealed and angle_step == 4, "reflected ray intersects target and reveals symbols")
+	dials = [2, 1, 0]
+	_check_seal()
+	_expect(not cabinet_open, "wrong symbol order rejected")
+	dials = ANSWER.duplicate()
+	_check_seal()
+	_expect(cabinet_open and not completed, "correct order opens casket but requires collecting artifact")
+	_act("chest")
+	_expect(completed and modal == "win", "artifact collection completes chapter")
+	_reset_progress()
+	_expect(not revealed and not mirror_placed and dials == [3, 4, 5], "restart resets all puzzles")
+	print("SELF_TEST_OK: 12 gameplay checks")
+	get_tree().quit(0)
+
+
+func _capture() -> void:
+	_reset_progress()
+	if capture_stage != "title":
+		screen = "game"
+	if capture_stage in ["light", "seal", "win"]:
+		mirror_found = true
+		mirror_placed = true
+		note_read = true
+		angle_step = 4
+		revealed = true
+	if capture_stage == "note":
+		note_read = true
+		modal = "note"
+	if capture_stage == "mirror":
+		mirror_found = true
+		modal = "mirror"
+	if capture_stage == "seal":
+		modal = "seal"
+	if capture_stage == "win":
+		cabinet_open = true
+		completed = true
+		modal = "win"
+	lid_t = 1.0 if cabinet_open else 0.0
+	await get_tree().create_timer(2.0).timeout
+	await RenderingServer.frame_post_draw
+	var result := get_viewport().get_texture().get_image().save_png(capture_path)
+	print("CAPTURE_RESULT: ", result)
+	get_tree().quit(0 if result == OK else 1)
+
+
+func _click_at(p: Vector2) -> void:
+	var press := InputEventMouseButton.new()
+	press.position = p
+	press.global_position = p
+	press.button_index = MOUSE_BUTTON_LEFT
+	press.pressed = true
+	get_viewport().push_input(press, true)
+	var release := press.duplicate() as InputEventMouseButton
+	release.pressed = false
+	get_viewport().push_input(release, true)
+	await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+
+
+func _run_ui_test() -> void:
+	_reset_progress()
+	await get_tree().create_timer(0.5).timeout
+	await _click_at(Vector2(1250, 820))
+	_expect(screen == "title" and hint_level == 0, "title blocks underlying controls")
+	await _click_at(Vector2(1340, 70))
+	_expect(modal == "help", "title help button opens visible overlay")
+	await _click_at(Vector2(1064, 221))
+	_expect(modal.is_empty(), "help overlay close receives input")
+	await _click_at(Vector2(520, 565))
+	_expect(screen == "game", "start button enters exploration")
+	await _click_at(Vector2(219, 549))
+	_expect(note_read and modal == "note", "paper hotspot opens note")
+	await _click_at(Vector2(353, 544))
+	_expect(not mirror_found, "note overlay blocks scene clicks")
+	await _click_at(Vector2(1064, 221))
+	await _click_at(Vector2(353, 544))
+	_expect(mirror_found and selected_item and modal == "mirror", "mirror hotspot adds inventory and opens artifact card")
+	await _click_at(Vector2(956, 678))
+	_expect(modal.is_empty(), "artifact card closes back to the scene")
+	await _click_at(Vector2(298, 832))
+	await _click_at(Vector2(603, 524))
+	_expect(not mirror_placed, "unselected inventory does not place mirror")
+	await _click_at(Vector2(298, 832))
+	await _click_at(Vector2(603, 524))
+	_expect(mirror_placed, "inventory and stand clicks place mirror")
+	for i in range(4):
+		await _click_at(Vector2(688, 742))
+	_expect(revealed, "rotation buttons reveal wall clue")
+	await _click_at(Vector2(984, 475))
+	_expect(modal == "seal", "casket hotspot opens symbol controls")
+	for i in range(3):
+		for j in range(3):
+			await _click_at(Vector2(500 + i * 191, 460))
+	_expect(dials == ANSWER, "symbol cards cycle to clue sequence")
+	await _click_at(Vector2(720, 669))
+	_expect(cabinet_open and modal.is_empty(), "submit button unlocks casket")
+	await _click_at(Vector2(984, 475))
+	_expect(completed and modal == "win", "artifact hotspot opens completion panel")
+	await _click_at(Vector2(867, 665))
+	_expect(not completed and not mirror_found and screen == "game", "restart button returns fresh playable scene")
+	print("UI_TEST_OK: 16 checks using viewport mouse events")
+	get_tree().quit(0)

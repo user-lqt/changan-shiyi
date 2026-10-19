@@ -1,0 +1,23 @@
+.godot/
+build/
+tmp/
+.claude/
+tests/artifacts/
+# Generated previews, conversion intermediates, original video deliveries and duplicate packages.
+/output/*
+!/output/README.md
+!/output/.gdignore
+/video/*
+!/video/README.md
+!/video/.gdignore
+/deliverables/*
+!/deliverables/README.md
+!/deliverables/.gdignore
+__pycache__/
+*.py[cod]
+*.tmp
+*.log
+.env
+.env.*
+!.env.example
+*.key

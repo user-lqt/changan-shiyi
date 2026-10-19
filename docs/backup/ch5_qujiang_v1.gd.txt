@@ -1,0 +1,706 @@
+extends "res://scripts/core/canvas.gd"
+## Qujiang: conserved word tiles rewrite only the mirror-world. Characters move on a
+## conditional graph; bridges, ferries and a cooperative lift are reusable systems.
+## Every puzzle mutation is undoable and saved in flags, independently of other chapters.
+
+const FIELD := Rect2(36, 145, 1088, 552)
+const NAMES := ["柳岸", "石埠", "照影洲", "竹台", "湖心亭"]
+const POINTS := [Vector2(164, 525), Vector2(366, 487), Vector2(554, 368), Vector2(782, 421), Vector2(980, 258)]
+const WORDS := ["流", "横", "映"]
+const SLOTS := {
+	"canal": {"word": "流", "name": "西渠", "p": Vector2(236, 585), "desc": "西渠流动，小舟可以往返；照影洲的倒影会碎。"},
+	"wheel": {"word": "流", "name": "东轮", "p": Vector2(940, 456), "desc": "引水到东轮；一人扶轮，另一人才能乘升台到湖心亭。"},
+	"home": {"word": "横", "name": "归桥", "p": Vector2(251, 443), "desc": "归桥横跨柳岸与石埠；取走这个字，桥就收起。"},
+	"bamboo": {"word": "横", "name": "竹梁", "p": Vector2(691, 340), "desc": "竹梁横过洲台之间的缺口。归桥会同时收起。"},
+	"reflection": {"word": "映", "name": "水镜", "p": Vector2(410, 333), "desc": "水静时，石埠到照影洲的倒影可走。西渠流动时失效。"},
+	"screen": {"word": "映", "name": "照壁", "p": Vector2(1045, 340), "desc": "亭上照壁映出诗笺。借走后纸仍在，倒影的字会消失。"},
+}
+const INITIAL := {"流": "canal", "横": "home", "映": "screen"}
+const TRAY := Rect2(36, 713, 1088, 142)
+
+var phase := "shore"                 # shore | mirror | done
+var state := {}
+var history: Array = []
+var active := 0
+var selected := ""
+var drag_word := ""
+var drag_start := Vector2.ZERO
+var drag_pos := Vector2.ZERO
+var walk_from := Vector2.ZERO
+var walk_to := Vector2.ZERO
+var walk_actor := -1
+var walk_t := 0.0
+var ink_from := Vector2.ZERO
+var ink_to := Vector2.ZERO
+var ink_word := ""
+var ink_t := 0.0
+var change_glow := 0.0
+var moves := 0
+var met_bai := false
+var saw_scroll := false
+var tips_seen := {}
+
+
+func enter() -> void:
+	g.music("ambient", false)
+	state = fresh_state()
+	var saved = g.flags.get("qujiang_state", {})
+	if saved is Dictionary and not saved.is_empty():
+		_restore(saved)
+	met_bai = bool(g.flags.get("qujiang_met_bai", false))
+	saw_scroll = bool(g.flags.get("qujiang_saw_scroll", false))
+	if g.cleared.has("ch5"):
+		phase = "done"
+	elif bool(g.flags.get("qujiang_entered", false)):
+		phase = "mirror"
+	else:
+		g.say("ch5_arrive")
+
+
+func fresh_state() -> Dictionary:
+	return {"words": INITIAL.duplicate(), "people": [0, 0], "boat": 0, "holder": -1, "scroll": false, "reached": false, "moves": 0}
+
+
+func _restore(raw: Dictionary) -> void:
+	state = fresh_state()
+	var words = raw.get("words", {})
+	if words is Dictionary:
+		for word in WORDS:
+			var slot: String = str(words.get(word, INITIAL[word]))
+			if slot == "tray" or (SLOTS.has(slot) and SLOTS[slot]["word"] == word):
+				state["words"][word] = slot
+	var people = raw.get("people", [0, 0])
+	if people is Array and people.size() == 2:
+		state["people"] = [clampi(int(people[0]), 0, 4), clampi(int(people[1]), 0, 4)]
+	state["boat"] = clampi(int(raw.get("boat", 0)), 0, 1)
+	var holder := clampi(int(raw.get("holder", -1)), -1, 1)
+	if holder >= 0 and state["people"][holder] == 3 and state["words"]["流"] == "wheel":
+		state["holder"] = holder
+	state["scroll"] = bool(raw.get("scroll", false))
+	state["reached"] = bool(raw.get("reached", false))
+	state["moves"] = maxi(0, int(raw.get("moves", 0)))
+	moves = state["moves"]
+	active = 0
+	selected = ""
+
+
+func _save() -> void:
+	state["moves"] = moves
+	g.flags["qujiang_state"] = state.duplicate(true)
+	g._save_progress()
+
+
+func _remember() -> void:
+	state["moves"] = moves
+	history.append({"state": state.duplicate(true), "active": active})
+	if history.size() > 80:
+		history.pop_front()
+	moves += 1
+
+
+func undo() -> bool:
+	if history.is_empty():
+		g.notify("还没有需要撤销的操作。镜景中的每一步都可以撤销。")
+		return false
+	var old: Dictionary = history.pop_back()
+	_restore(old["state"])
+	active = int(old["active"])
+	walk_t = 0.0
+	ink_t = 0.0
+	change_glow = 0.6
+	g.sfx("note")
+	_save()
+	return true
+
+
+func reset_mirror() -> void:
+	_remember()
+	state = fresh_state()
+	moves = 0
+	active = 0
+	selected = ""
+	walk_t = 0.0
+	_save()
+	g.notify("镜景恢复。已收集的图鉴与其他章节进度保留。")
+
+
+func occupied(slot: String) -> String:
+	for word in WORDS:
+		if state["words"][word] == slot:
+			return word
+	return ""
+
+
+func place(word: String, slot: String) -> bool:
+	if not WORDS.has(word) or (slot != "tray" and (not SLOTS.has(slot) or SLOTS[slot]["word"] != word)):
+		g.notify("字与景物的意思要相合。选字后，金色字槽就是可以放入的位置。")
+		g.sfx("error")
+		return false
+	if state["words"][word] == slot:
+		return false
+	_remember()
+	ink_from = word_position(word)
+	state["words"][word] = slot
+	ink_to = word_position(word)
+	ink_word = word
+	ink_t = 0.0 if g.test_mode else 0.7
+	if word == "流" and slot != "wheel":
+		state["holder"] = -1
+	selected = ""
+	change_glow = 1.0
+	g.sfx("reveal", -13)
+	_save()
+	return true
+
+
+func calm() -> bool:
+	return state["words"]["流"] != "canal"
+
+
+func lift_on() -> bool:
+	var holder: int = state["holder"]
+	return state["words"]["流"] == "wheel" and holder >= 0 and state["people"][holder] == 3
+
+
+func edge(a: int, b: int) -> String:
+	var lo := mini(a, b)
+	var hi := maxi(a, b)
+	if lo == 0 and hi == 1:
+		if state["words"]["流"] == "canal" and state["boat"] == a:
+			return "boat"
+		if state["words"]["横"] == "home":
+			return "bridge"
+	elif lo == 1 and hi == 2 and calm() and state["words"]["映"] == "reflection":
+		return "reflection"
+	elif lo == 2 and hi == 3 and state["words"]["横"] == "bamboo":
+		return "bamboo"
+	elif lo == 3 and hi == 4 and lift_on():
+		return "lift"
+	return ""
+
+
+func travel(to: int) -> bool:
+	if to < 0 or to >= POINTS.size():
+		return false
+	var at: int = state["people"][active]
+	if to == at:
+		return false
+	if state["holder"] == active:
+		g.notify("%s正在扶住水轮。先松手，或者 Tab 切换到同伴。" % person_name(active))
+		return false
+	var route := edge(at, to)
+	if route.is_empty():
+		g.sfx("error")
+		g.notify(block_reason(at, to), 5.0)
+		return false
+	_remember()
+	walk_from = POINTS[at]
+	walk_to = POINTS[to]
+	walk_actor = active
+	walk_t = 0.0 if g.test_mode else 0.75
+	state["people"][active] = to
+	if state["people"][0] >= 3 and state["people"][1] >= 3:
+		state["reached"] = true
+	if route == "boat":
+		state["boat"] = to
+	g.sfx("place", -12)
+	_save()
+	if to == 2 and not tips_seen.has("reflection"):
+		tips_seen["reflection"] = true
+		g.notify("脚下只有倒影，却真的走到了洲上。回程也要留意水流。", 5)
+	return true
+
+
+func block_reason(a: int, b: int) -> String:
+	var lo := mini(a, b)
+	var hi := maxi(a, b)
+	if hi - lo != 1:
+		return "先走到相邻的落脚点。金色虚线表示当前可以通过。"
+	match lo:
+		0:
+			return "归桥收起了。把「横」放回归桥，或引流后点击「唤舟」。"
+		1:
+			return "水流会打碎倒影。借走西渠的「流」，再把「映」放入水镜。" if not calm() else "把「映」从照壁借到水镜，倒影便能接起石埠和照影洲。"
+		2:
+			return "借走归桥的「横」，让竹梁横过这道缺口。记得同伴也要过来。"
+		3:
+			return "把「流」放入东轮，再让一人留在竹台扶轮，另一人乘升台。"
+	return "这条路还没有接通。"
+
+
+func summon_boat() -> bool:
+	var at: int = state["people"][active]
+	if at > 1 or state["words"]["流"] != "canal":
+		g.notify("小舟只在柳岸与石埠间摆渡，需要西渠的「流」。")
+		return false
+	if state["boat"] == at:
+		g.notify("舟已靠岸。点击对面的落脚点即可乘舟。")
+		return false
+	_remember()
+	state["boat"] = at
+	g.sfx("rotate", -10)
+	_save()
+	return true
+
+
+func hold_wheel() -> bool:
+	if state["holder"] == active:
+		_remember()
+		state["holder"] = -1
+	elif state["people"][active] != 3 or state["words"]["流"] != "wheel":
+		g.notify("人要站在竹台，「流」要放在东轮。两者齐备才能扶轮。")
+		return false
+	elif state["holder"] >= 0:
+		g.notify("同伴已扶住水轮。你可以乘升台了。")
+		return false
+	else:
+		_remember()
+		state["holder"] = active
+		g.notify("%s扶住水轮。Tab 切换同伴，点击湖心亭乘升台。" % person_name(active), 6)
+	g.sfx("rotate")
+	_save()
+	return true
+
+
+func take_scroll() -> bool:
+	if state["people"][active] != 4 or state["scroll"]:
+		g.notify("先到湖心亭，再取诗笺。")
+		return false
+	_remember()
+	state["scroll"] = true
+	g.flags["qujiang_scroll_seen"] = true
+	g.sfx("pickup")
+	_save()
+	g.say("ch5_scroll")
+	return true
+
+
+func leave_mirror() -> bool:
+	if not state["scroll"] or state["people"] != [0, 0]:
+		g.notify("带上诗笺，让苏晴和阿拾都回到柳岸，才能一起走出铜镜。", 5)
+		return false
+	phase = "done"
+	g.flags["bai_introduction"] = true
+	g.flags["qujiang_entered"] = false
+	g.flags["qujiang_recovered"] = true
+	g.clear("ch5")
+	g.sfx("win")
+	g.say("ch5_done")
+	return true
+
+
+func person_name(i: int) -> String:
+	return "苏晴" if i == 0 else "阿拾"
+
+
+func word_position(word: String) -> Vector2:
+	var slot: String = state["words"][word]
+	return SLOTS[slot]["p"] if SLOTS.has(slot) else Vector2(114 + WORDS.find(word) * 167, 762)
+
+
+func tick(delta: float, _blocked: bool) -> void:
+	walk_t = maxf(0.0, walk_t - delta)
+	ink_t = maxf(0.0, ink_t - delta)
+	change_glow = maxf(0.0, change_glow - delta)
+
+
+func key(event: InputEventKey) -> bool:
+	if phase != "mirror":
+		return false
+	match event.keycode:
+		KEY_TAB:
+			active = 1 - active
+			selected = ""
+			return true
+		KEY_BACKSPACE, KEY_U:
+			undo()
+			return true
+		KEY_ESCAPE:
+			if not selected.is_empty():
+				selected = ""
+				return true
+	return false
+
+
+func mouse(event: InputEvent) -> bool:
+	if phase != "mirror" or walk_t > 0:
+		return false
+	if event is InputEventMouseMotion:
+		drag_pos = event.position
+		return not drag_word.is_empty()
+	if not event is InputEventMouseButton:
+		return false
+	if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+		selected = ""
+		drag_word = ""
+		return true
+	if event.button_index != MOUSE_BUTTON_LEFT:
+		return false
+	var id := hit(event.position)
+	if not event.pressed and not drag_word.is_empty():
+		if event.position.distance_to(drag_start) > 10:
+			if id.begins_with("slot_"):
+				place(drag_word, id.trim_prefix("slot_"))
+			elif TRAY.has_point(event.position):
+				place(drag_word, "tray")
+		drag_word = ""
+		return true
+	if event.pressed:
+		var word := ""
+		if id.begins_with("word_"):
+			word = id.trim_prefix("word_")
+		elif id.begins_with("slot_"):
+			var slot := id.trim_prefix("slot_")
+			if not selected.is_empty():
+				place(selected, slot)
+				return true
+			word = occupied(slot)
+		if not word.is_empty():
+			selected = word
+			drag_word = word
+			drag_start = event.position
+			drag_pos = event.position
+			g.sfx("note", -10)
+			return true
+	return false
+
+
+func act(id: String) -> void:
+	if _common_act(id):
+		return
+	if id == "map":
+		g.go("map")
+		return
+	if phase == "shore":
+		match id:
+			"bai":
+				met_bai = true
+				g.flags["qujiang_met_bai"] = true
+				_save()
+				g.say("ch5_bai")
+			"pool":
+				saw_scroll = true
+				g.flags["qujiang_saw_scroll"] = true
+				_save()
+				g.say("ch5_pool")
+			"enter":
+				if not met_bai or not saw_scroll:
+					g.notify("先问清诗笺的来历，再看看水里异常的倒影。")
+				else:
+					phase = "mirror"
+					g.flags["qujiang_entered"] = true
+					_save()
+					g.say("ch5_enter")
+		return
+	if phase == "done":
+		if id == "card":
+			g.show_card("qujiang")
+		return
+	if walk_t > 0:
+		return
+	if id.begins_with("node_"):
+		travel(int(id.trim_prefix("node_")))
+	elif id.begins_with("person_"):
+		active = int(id.trim_prefix("person_"))
+		selected = ""
+	elif id.begins_with("slot_") and not selected.is_empty():
+		place(selected, id.trim_prefix("slot_"))
+	else:
+		match id:
+			"undo": undo()
+			"reset": reset_mirror()
+			"boat": summon_boat()
+			"wheel": hold_wheel()
+			"scroll": take_scroll()
+			"leave": leave_mirror()
+			"unplace":
+				if not selected.is_empty():
+					place(selected, "tray")
+			"card": g.show_card("mirror_words")
+
+
+func help_lines() -> Array:
+	return ["Tab 或角色按钮切换同伴；点击金圈内的落脚点移动。", "选字后点同字的槽，也可拖动；每字只有一枚，搬走便失效。", "西渠的「流」能唤舟；取走后水静，「映」可在水镜铺路。", "「流」在东轮时，一人留在竹台扶轮，另一人乘升台。", "取笺后两人都要回柳岸；U 撤销、右键取消选字。"]
+
+
+func journal_lines() -> Array:
+	return ["铜镜映出另一幅曲江；挪字只改变镜景。每字一枚，原处随之失效。", "倒影需水静；「横」可移桥；一人扶东轮，另一人乘升台。", "诗笺取回后两人同归柳岸；白居易将引见慈恩寺僧人。"]
+
+
+func hint() -> String:
+	if phase == "shore":
+		return "先点击白居易与水面，再举起铜镜。"
+	if phase == "done":
+		return "诗笺已物归原主。回到舆图，前往慈恩寺。"
+	if state["scroll"]:
+		if state["people"].has(4):
+			return "扶轮的人先别动；让亭上的同伴乘升台返回竹台，再松手。"
+		if state["people"].has(3):
+			return "两人经竹梁回到照影洲。等两人过完，再挪走「横」。"
+		if state["people"].has(2):
+			return "保持西渠静止，让两人沿倒影回石埠。"
+		return "把「横」放回归桥，让两人回柳岸；也可以引流唤舟。"
+	if state["people"].has(4):
+		return "湖心亭里有诗笺，切换到亭上的人再点击取回。"
+	if state["people"].has(3):
+		return "两人都到竹台后，把「流」放东轮。阿拾扶轮，苏晴乘升台。"
+	if state["people"].has(2):
+		return "把「横」从归桥移到竹梁，接通照影洲与竹台。两个人都要过来。"
+	if state["words"]["映"] != "reflection" or not calm():
+		return "先让两人到石埠，把「映」借到水镜，再借走西渠的「流」令水面平静。"
+	return "倒影路接通了。点击照影洲，别忘了 Tab 切换同伴。"
+
+
+# ---------------------------------------------------------------- visual scene
+func _draw() -> void:
+	hit_regions.clear()
+	var full := Rect2(0, 0, 1440, 900)
+	if not _img_cover("qujiang", full):
+		draw_rect(full, Color("588e8c"))
+	if phase == "mirror":
+		draw_rect(full, Color(0.07, 0.20, 0.20, 0.27))
+	# Soft top and bottom shade so the floating text stays readable on the painting.
+	for i in range(16):
+		var k := 1.0 - i / 16.0
+		draw_rect(Rect2(0, i * 8, 1440, 8), Color(0.01, 0.02, 0.025, 0.2 * k * k))
+		draw_rect(Rect2(0, 900 - (i + 1) * 12, 1440, 12), Color(0.01, 0.02, 0.025, 0.24 * k * k))
+	title_block("第五章  ·  曲江借字", "第三日 · 曲江春宴  /  字在镜中，人走画间")
+	if phase == "mirror":
+		_draw_water()
+		_draw_paths()
+		for i in range(5):
+			_draw_island(i)
+		_draw_boat()
+		for i in range(2):
+			_draw_person(i)
+		_draw_slots()
+		_draw_tray()
+		if ink_t > 0:
+			var t := 1.0 - ink_t / 0.7
+			var p := ink_from.lerp(ink_to, t) + Vector2(0, -sin(t * PI) * 62)
+			_tc(p.x, p.y + 12, ink_word, 33, Pal.GOLD)
+		if not drag_word.is_empty() and drag_pos.distance_to(drag_start) > 10:
+			_box(Rect2(drag_pos - Vector2(25, 25), Vector2(50, 50)), Color(0.09, 0.18, 0.17, 0.9), 8, Pal.GOLD)
+			_tc(drag_pos.x, drag_pos.y + 12, drag_word, 31, Pal.PAPER)
+	else:
+		_draw_shore()
+	_draw_sidebar()
+	if g.preview_chapter == "ch5":
+		_t(Vector2(38, 885), "独立试玩 · 本次进度不写入主线存档", 11, Pal.MUTED)
+
+
+func _draw_water() -> void:
+	for i in range(26):
+		var x := FIELD.position.x + 25 + fmod(i * 109.0, FIELD.size.x - 65)
+		var y := FIELD.position.y + 75 + fmod(i * 67.0, FIELD.size.y - 105)
+		var shift := sin(age * (1.4 if not calm() else 0.35) + i) * (15 if not calm() else 3)
+		draw_arc(Vector2(x + shift, y), 13 + i % 4 * 6, 0.15, PI * 0.8, 14, Color(0.82, 0.9, 0.73, 0.14), 1, true)
+	_box(Rect2(52, 158, 212, 30), Color(0.02, 0.035, 0.04, 0.66), 15)
+	_t(Vector2(68, 179), "镜中曲江  /  水静" if calm() else "镜中曲江  /  西渠流动", 12, Pal.PAPER)
+
+
+func _path(a: Vector2, b: Vector2, enabled: bool, kind: String) -> void:
+	var dir := (b - a).normalized()
+	var perp := Vector2(-dir.y, dir.x)
+	var from := a + dir * 48
+	var to := b - dir * 48
+	if kind == "bridge" or kind == "bamboo":
+		if enabled:
+			draw_line(from, to, Color("493d2c"), 25, true)
+			draw_line(from, to, Color("b8a16b"), 18, true)
+			for j in range(14):
+				var p := from.lerp(to, j / 13.0)
+				draw_line(p - perp * 12, p + perp * 12, Color("756545"), 2, true)
+		else:
+			draw_line(from, from + dir * 16, Color("6c7f6e"), 17, true)
+			draw_line(to, to - dir * 16, Color("6c7f6e"), 17, true)
+	elif kind == "reflection" and enabled:
+		for w in [28, 17, 5]:
+			draw_line(from, to, Color(0.65, 0.97, 0.88, 0.12 if w > 5 else 0.7), w, true)
+		for j in range(13):
+			var p := from.lerp(to, j / 12.0)
+			draw_line(p - perp * 14, p + perp * 14, Color(0.73, 1.0, 0.9, 0.52), 1.4, true)
+	elif kind == "lift":
+		draw_line(from - perp * 10, to - perp * 10, Color("796f4d"), 2, true)
+		draw_line(from + perp * 10, to + perp * 10, Color("796f4d"), 2, true)
+	for j in range(18):
+		if j % 2 == 0:
+			draw_line(from.lerp(to, j / 18.0), from.lerp(to, (j + 1) / 18.0), Color(0.91, 0.8, 0.51, 0.88 if enabled else 0.18), 2, true)
+
+
+func _draw_paths() -> void:
+	_path(POINTS[0], POINTS[1], state["words"]["横"] == "home", "bridge")
+	_path(POINTS[1], POINTS[2], calm() and state["words"]["映"] == "reflection", "reflection")
+	_path(POINTS[2], POINTS[3], state["words"]["横"] == "bamboo", "bamboo")
+	_path(POINTS[3], POINTS[4], lift_on(), "lift")
+	var wp := Vector2(889, 398)
+	draw_arc(wp, 23, 0, TAU, 40, Color("b7a16a"), 5, true)
+	for j in range(8):
+		var a: float = j * TAU / 8 + (age * 1.5 if state["words"]["流"] == "wheel" else 0.0)
+		var d := Vector2.from_angle(a)
+		draw_line(wp, wp + d * 25, Color("9b8458"), 3, true)
+	if lift_on():
+		_t(Vector2(872, 367), "水轮已稳", 12, Pal.JADE)
+
+
+func _draw_island(i: int) -> void:
+	var p: Vector2 = POINTS[i]
+	var size := Vector2(67, 36) if i in [1, 2, 3] else Vector2(84, 42)
+	draw_set_transform(p + Vector2(0, 22), 0, Vector2(1, 0.42))
+	draw_circle(Vector2.ZERO, size.x + 8, Color(0.03, 0.12, 0.12, 0.28))
+	draw_set_transform(p, 0, Vector2(1, size.y / size.x))
+	draw_circle(Vector2.ZERO, size.x, Color("656c55"))
+	draw_circle(Vector2(0, -7), size.x - 3, Color("b3b28a"))
+	draw_arc(Vector2(0, -7), size.x - 9, 0, TAU, 48, Color("d0c59c"), 1, true)
+	draw_set_transform(Vector2.ZERO)
+	if i == 4:
+		# Small raised pavilion in the mirror painting.
+		for x in [-48, 48]:
+			draw_line(p + Vector2(x, -9), p + Vector2(x, -86), Color("65523b"), 6, true)
+		var roof := PackedVector2Array([p + Vector2(-76, -77), p + Vector2(-45, -91), p + Vector2(0, -112), p + Vector2(45, -91), p + Vector2(76, -77)])
+		draw_colored_polygon(roof, Color("344c49"))
+		draw_polyline(roof, Color("d1b37a"), 2, true)
+		if not state["scroll"]:
+			_box(Rect2(p + Vector2(-22, -30), Vector2(44, 19)), Color("e6d6ad"), 3)
+			_t(p + Vector2(-13, -15), "笺", 13, Color("6b6046"))
+	elif i == 2:
+		# An incomplete arch gains its walkable counterpart only in calm water.
+		for k in range(3):
+			var q := p + Vector2(-38 + k * 16, -16 - sin(k / 3.0 * PI) * 13)
+			_box(Rect2(q, Vector2(15, 9)), Color("8a9985"), 2, Color("bdc5a4"))
+	elif i == 3:
+		for x in [-37, -24, -11, 2, 15, 28]:
+			draw_line(p + Vector2(x, 12), p + Vector2(x - 6, -4), Color("83885a"), 2, true)
+	else:
+		for j in range(3):
+			var q := p + Vector2(-38 + j * 28, 10 + (j % 2) * 5)
+			draw_line(q, q + Vector2(20, -2), Color("828e7b"), 1, true)
+	var label := Rect2(p + Vector2(-47, 40), Vector2(94, 26))
+	_box(label, Color(0.06, 0.15, 0.15, 0.84), 5)
+	_tc(p.x, p.y + 58, NAMES[i], 13, Pal.PAPER)
+	var at: int = state["people"][active]
+	if at != i and not edge(at, i).is_empty() and state["holder"] != active:
+		draw_arc(p, 42 + sin(age * 3) * 2, 0, TAU, 40, Pal.GOLD, 2, true)
+	_register("node_%d" % i, Rect2(p - Vector2(63, 42), Vector2(126, 111)))
+
+
+func _draw_person(i: int) -> void:
+	var p: Vector2 = POINTS[int(state["people"][i])]
+	if walk_actor == i and walk_t > 0:
+		p = walk_from.lerp(walk_to, smoothstep(0, 1, 1.0 - walk_t / 0.75))
+	p += Vector2(-18 if i == 0 else 19, -5)
+	if active == i:
+		draw_arc(p + Vector2(0, 5), 15, 0, TAU, 32, Pal.GOLD, 2, true)
+	var coat := Color("b9d6d0") if i == 0 else Color("d5aa68")
+	draw_colored_polygon(PackedVector2Array([p + Vector2(-10, 5), p + Vector2(-8, -13), p + Vector2(7, -13), p + Vector2(12, 5)]), coat)
+	draw_line(p + Vector2(-6, -8), p + Vector2(6, -1), Color("6e7971"), 2, true)
+	draw_circle(p + Vector2(0, -23), 7, Color("d7bc96"))
+	draw_arc(p + Vector2(0, -24), 7, PI, TAU, 16, Color("263333"), 6, true)
+	if i == 0:
+		draw_circle(p + Vector2(0, -33), 4, Color("293737"))
+	if state["holder"] == i:
+		_t(p + Vector2(-17, -43), "扶轮", 11, Pal.GOLD)
+	_register("person_%d" % i, Rect2(p - Vector2(13, 34), Vector2(26, 49)))
+
+
+func _draw_boat() -> void:
+	var p: Vector2 = POINTS[int(state["boat"])] + Vector2(0, 52)
+	p.y += sin(age * 1.7) * 2
+	draw_colored_polygon(PackedVector2Array([p + Vector2(-37, -6), p + Vector2(37, -6), p + Vector2(22, 6), p + Vector2(-23, 6)]), Color("7a5940"))
+	draw_line(p + Vector2(-32, -5), p + Vector2(32, -5), Color("ceb382"), 2, true)
+
+
+func _draw_slots() -> void:
+	for id in SLOTS:
+		var spec: Dictionary = SLOTS[id]
+		var p: Vector2 = spec["p"]
+		var word := occupied(id)
+		var compatible: bool = not selected.is_empty() and spec["word"] == selected
+		var r := Rect2(p - Vector2(23, 23), Vector2(46, 46))
+		_box(r, Color(0.08, 0.19, 0.18, 0.92), 7, Pal.GOLD if compatible else Color("849778"), 2 if compatible else 1)
+		_tc(p.x, p.y + 10, word if not word.is_empty() else spec["word"], 27, Pal.PAPER if not word.is_empty() else Color("63796b"))
+		_box(Rect2(p + Vector2(-32, 28), Vector2(64, 23)), Color(0.06, 0.14, 0.14, 0.85), 4)
+		_tc(p.x, p.y + 44, spec["name"], 11, Pal.GOLD if compatible else Pal.PAPER)
+		_register("slot_" + str(id), r.grow(4))
+		if r.has_point(_mouse()):
+			var tip := Rect2(63, 640, 1025, 35)
+			_box(tip, Color(0.06, 0.14, 0.14, 0.96), 6, Color("5e796a"))
+			_t(tip.position + Vector2(13, 24), spec["desc"], 14, Pal.PAPER)
+
+
+func _draw_tray() -> void:
+	_glass(TRAY)
+	_t(Vector2(53, 738), "借字  /  选字后点字槽，也可拖动", 12, Pal.GOLD)
+	for i in range(3):
+		var word: String = WORDS[i]
+		var r := Rect2(53 + i * 167, 750, 152, 65)
+		_box(r, Color("31483e") if selected == word else Color("1c3430"), 7, Pal.GOLD if selected == word else Color("456352"))
+		_tc(r.position.x + 29, r.position.y + 43, word, 32, Pal.PAPER)
+		var slot: String = state["words"][word]
+		_t(r.position + Vector2(54, 28), SLOTS[slot]["name"] if SLOTS.has(slot) else "暂存手中", 14, Pal.PAPER)
+		_t(r.position + Vector2(54, 48), "已选中" if selected == word else "点击借用", 11, Pal.GOLD if selected == word else Pal.MUTED)
+		_register("word_" + word, r)
+	_button("unplace", Rect2(555, 754, 112, 32), "暂存选中字", false, 12, not selected.is_empty())
+	_button("undo", Rect2(555, 795, 112, 32), "撤销  U", false, 13, not history.is_empty())
+	for i in range(2):
+		var r := Rect2(690 + i * 199, 750, 185, 47)
+		_button("person_%d" % i, r, "%s · %s" % [person_name(i), NAMES[int(state["people"][i])]], active == i, 14)
+	_t(Vector2(691, 826), "Tab 切换同伴 · 金圈是可到达的位置", 12, Pal.MUTED)
+	_button("reset", Rect2(985, 805, 118, 30), "重置镜景", false, 12)
+
+
+## Translucent ink panel with a gold top rule, used instead of the old opaque boxes.
+func _glass(r: Rect2) -> void:
+	_box(r, Color(0.02, 0.035, 0.04, 0.74), 4, Color(0.84, 0.72, 0.48, 0.28))
+	draw_rect(Rect2(r.position, Vector2(r.size.x, 2)), Color(Pal.GOLD, 0.7))
+
+
+func _draw_sidebar() -> void:
+	var r := Rect2(1140, 145, 264, 710)
+	_glass(r)
+	_t(Vector2(1160, 182), "一字一景", 23, Pal.PAPER)
+	_wrap(Vector2(1161, 213), "借走一个字，也要承担原处失去它的变化。", 218, 13, Pal.MUTED, 23)
+	draw_line(Vector2(1160, 259), Vector2(1383, 259), Color("385145"))
+	var goals := [["借字过水", "让两人抵达竹台", state.get("reached", false)], ["分头取笺", "一人扶轮，一人登亭", state.get("scroll", false)], ["一起归岸", "带诗笺回到现实曲江", phase == "done"]]
+	for i in range(3):
+		var y := 292 + i * 72
+		_t(Vector2(1161, y), ("✓  " if goals[i][2] else "%d  " % (i + 1)) + goals[i][0], 17, Pal.JADE if goals[i][2] else Pal.PAPER)
+		_t(Vector2(1161, y + 26), goals[i][1], 12, Pal.MUTED)
+	if phase == "mirror":
+		var at: int = state["people"][active]
+		_t(Vector2(1160, 514), "当前操作 · " + person_name(active), 14, Pal.GOLD)
+		if at in [0, 1]:
+			_button("boat", Rect2(1160, 534, 222, 36), "唤舟到这一岸", false, 13)
+		elif at == 3:
+			_button("wheel", Rect2(1160, 534, 222, 36), "松开水轮" if state["holder"] == active else "扶住水轮", state["holder"] != active, 14)
+		elif at == 4:
+			_button("scroll", Rect2(1160, 534, 222, 36), "诗笺已取回" if state["scroll"] else "取回诗笺", true, 14, not state["scroll"])
+		else:
+			_t(Vector2(1161, 555), "挪字接路，再点击落脚点。", 12, Pal.MUTED)
+		_button("leave", Rect2(1160, 584, 222, 40), "携笺走出铜镜", true, 14, state["scroll"] and state["people"] == [0, 0])
+		_t(Vector2(1161, 656), "已操作 %d 步 · 随时可撤销" % moves, 12, Pal.MUTED)
+	_button("journal", Rect2(1160, 683, 222, 36), "手札与图鉴  J", false, 13)
+	_button("hint", Rect2(1160, 731, 222, 36), "阿拾的提示  H", false, 13)
+	_button("map", Rect2(1160, 792, 222, 39), "回到长安舆图", false, 14)
+
+
+func _draw_shore() -> void:
+	draw_rect(FIELD, Color(0.06, 0.15, 0.14, 0.12))
+	_glass(Rect2(68, 180, 449, 165))
+	_t(Vector2(91, 218), "曲江 · 天已放晴", 23, Pal.PAPER)
+	_wrap(Vector2(92, 253), "诗笺落进水里，倒影却把字吞了进去。举起铜镜，镜中的水榭、桥与文字正在彼此呼应。" if phase == "shore" else "水面恢复如常。湿透的诗笺回到了白居易手中，苏晴与阿拾也找到了通向慈恩寺的路。", 394, 16, Pal.MUTED, 28)
+	if phase == "shore":
+		_button("bai", Rect2(84, 533, 210, 48), "拜访白居易" + (" ✓" if met_bai else ""), false, 16)
+		_button("pool", Rect2(318, 533, 210, 48), "观察落水诗笺" + (" ✓" if saw_scroll else ""), false, 16)
+		_button("enter", Rect2(84, 606, 444, 52), "举镜 · 进入字里行间", true, 19, met_bai and saw_scroll)
+	else:
+		_glass(Rect2(86, 510, 445, 143))
+		_t(Vector2(111, 549), "得到白居易的引见", 26, Pal.PAPER)
+		_wrap(Vector2(113, 582), "诗笺物归原主。随白居易入寺，向僧人打听登塔之路。", 390, 15, Pal.MUTED, 25)
+	_glass(TRAY)
+	_t(Vector2(59, 748), "现实与镜景", 15, Pal.GOLD)
+	_t(Vector2(59, 782), "镜里的路，需要借字接起；回来的路，要把同伴一起带上。", 17, Pal.PAPER)
+	if phase == "done":
+		_button("card", Rect2(59, 800, 180, 35), "曲江见闻", false, 13)
+	else:
+		_t(Vector2(59, 824), "先拜访、再观察，进入镜景后开始借字解谜。", 13, Pal.MUTED)

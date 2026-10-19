@@ -1,0 +1,8 @@
+Use case: identity-preserve
+Asset type: original merchant rebuttal action portrait for a fullscreen historical mystery game animation.
+Input images: Image 1 is the identity, outfit and rendering-style reference. Keep this exact middle-aged Central Asian merchant's recognizable face, black curly beard and mustache, tall patterned cap, ornate muted vermilion and antique gold Tang trading robe, teal trousers. Change his pose and expression.
+Primary request: a dramatic waist-up portrait of the same merchant rebutting a weak accusation. Body on the RIGHT of the image facing LEFT, leaning forward, one hand thrust toward the LEFT with an open palm in an emphatic stop gesture, the other hand near his chest gripping his robe. Tense brows, eyes skeptical and indignant, mouth open in an animated retort. Keep him human and theatrical rather than villainous. Remove the cup from the reference.
+Style/medium: detailed semi-realistic hand-painted game character art matching the reference, rich brocade textile, cinematic warm lantern rim lighting and cool deep teal shadow. Dynamic folds, clear facial acting, natural hand anatomy.
+Composition/framing: landscape 1536 by 1024, waist-up, complete hat, head, shoulders, arms and outstretched hand. Six percent safe margin. Torso and face on the right half, hand extending toward the left third. No clipped fingers or hat.
+Background: perfectly flat saturated chroma green RGB 0,255,0, no gradient, no green reflected light, no cast shadow on the background. Background is for later local chroma-key extraction, not transparency.
+Constraints: exactly one person, same identity and costume as reference, natural five-finger anatomy, no extra props, no words, no frame, no watermark.

@@ -1,0 +1,16 @@
+v0.2 新增图像素材提示词（模型 gpt-image-2，YosHub OpenAI Images 接口，n=1）
+
+公共风格后缀（每条提示词末尾都附加）：
+high quality painterly concept art for a Chinese historical mystery adventure game, fine textured brushwork, warm amber and muted teal palette, no people, no written text, no letters, no calligraphy, no UI, no logo, no watermark.
+
+[title] 1536x1024 → assets/images/title.jpg
+Night view of Tang dynasty Chang'an city in light rain, the Giant Wild Goose Pagoda silhouetted in the distance under a hazy moon, rooftops with glowing lanterns, a quiet wet stone lane in the foreground leading to an old wooden workshop door with a single warm lantern. Wide cinematic landscape, calm and inviting, generous dark empty sky area in the upper left third for title overlay.
+
+[mirror] 1024x1024 → assets/images/mirror.png
+Close-up still life of an ancient Tang dynasty bronze mirror back (sea-beast and grapevine motif), round, centered, with green patina and gold highlights, lying on dark teal silk cloth, soft lantern light from upper left, museum artifact study.
+
+[shard] 1024x1024 → assets/images/shard.png
+Close-up still life of a single broken celadon porcelain shard from the Tang dynasty, pale jade green glaze with delicate incised lotus pattern, crackle glaze, centered, resting on dark wooden surface with soft rim light, museum artifact study, dark teal background.
+
+[paper] 1536x1024 → assets/images/paper.jpg
+Top-down view of a blank aged handmade paper sheet with soft fibers, faint water stains and worn edges, filling most of the frame, on a dark wooden worktable with a brush rest and ink stone at the edges, warm lantern light. The paper is completely blank.

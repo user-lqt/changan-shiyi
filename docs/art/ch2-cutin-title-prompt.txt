@@ -1,0 +1,8 @@
+Use case: illustration-story
+Asset type: standalone dramatic breakthrough title graphic for an original Tang mystery game cut-in.
+Primary request: exactly the two Chinese characters and exclamation mark "识破！" as the dominant oversized brush calligraphy, inside an explosive jagged ivory-paper speech burst. The characters should have strong forward momentum, bold confident thick strokes, dark ink-black calligraphy with a cinnabar-red painted accent and a thin antique-gold highlight. The whole ivory burst has a thick uneven dark ink outline and a few rough red and gold brush splashes around its perimeter. This is an original historical mystery game title treatment.
+Text (verbatim): "识破！"
+Style/medium: high-impact hand-painted Chinese brush lettering, torn paper and dry-brush texture, strong readable silhouette, premium stylized game illustration. Restrained palette: parchment ivory, ink black, cinnabar red, antique gold. Make the actual characters very large and highly legible.
+Composition/framing: landscape 1536 by 1024. A wide horizontally oriented burst centered in the middle 80 percent of the canvas, complete perimeter and all text visible, no clipping. The burst and text together form one connected graphic. Leave clean safe margin around it for local extraction. Do not add a person, scenery, panels or other writing.
+Background: perfectly flat saturated chroma green RGB 0,255,0, no gradient, no background shadow, no green inside the intended paper burst. Background is for later local chroma-key extraction, not transparency.
+Constraints: spell the exact Chinese characters 识 and 破 correctly, followed by the fullwidth exclamation mark ！. No English, no other text, no logo, no watermark. Do not use a named game's logo or title graphic.
