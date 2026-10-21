@@ -1,0 +1,19 @@
+{
+  "release": "snapshot-2026-10-21",
+  "built_at": "2026-10-21T17:34:31+08:00",
+  "engine": "Godot 4.7.2",
+  "platform": "Windows x86_64",
+  "file": "长安拾遗.exe",
+  "release_asset": "ChangAnShiyi-Windows-x64.exe",
+  "bytes": 307501880,
+  "sha256": "ad74d9f6a99102e4f75309476c813187123e27069ebc014787c5b202344dbd1a",
+  "gameplay_source_commit": "d6f0a48985e29e23fd363b9830608924da89fb3c",
+  "validation": {
+    "standalone_logic_checks_passed": 220,
+    "navigation_ui_checks_passed": 53,
+    "standalone_save_menu_capture": "passed",
+    "standalone_score_capture": "passed",
+    "standalone_tower_window_capture": "passed",
+    "embedded_story_videos": 5
+  }
+}
