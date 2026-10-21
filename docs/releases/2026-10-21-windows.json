@@ -1,19 +1,21 @@
 {
-  "release": "snapshot-2026-10-21",
-  "built_at": "2026-10-21T17:34:31+08:00",
+  "release": "snapshot-2026-10-21-r2",
+  "built_at": "2026-10-21T20:35:30+08:00",
   "engine": "Godot 4.7.2",
   "platform": "Windows x86_64",
   "file": "长安拾遗.exe",
   "release_asset": "ChangAnShiyi-Windows-x64.exe",
-  "bytes": 307501880,
-  "sha256": "ad74d9f6a99102e4f75309476c813187123e27069ebc014787c5b202344dbd1a",
-  "gameplay_source_commit": "d6f0a48985e29e23fd363b9830608924da89fb3c",
+  "bytes": 307523192,
+  "sha256": "2e43dc61b755fb0830fbcc1e6029ab5bf38e882ff2a9926628278598c738de58",
+  "gameplay_source_commit": "ece1e7e9d2a4695218fc3d51436fcb819076a935",
   "validation": {
     "standalone_logic_checks_passed": 220,
     "navigation_ui_checks_passed": 53,
     "standalone_save_menu_capture": "passed",
     "standalone_score_capture": "passed",
     "standalone_tower_window_capture": "passed",
-    "embedded_story_videos": 5
-  }
+    "embedded_story_videos": 5,
+    "updated_voice_assets_embedded": "two exact MP3 payload matches"
+  },
+  "rebuild_note": "第三章米娜两句台词重新配音（西域口音）后重新导出；独立版逻辑自检 220 项通过，其余校验沿用 17:34 构建结果。"
 }
