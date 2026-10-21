@@ -78,7 +78,9 @@ func enter() -> void:
 	film_player.visible = false
 	film_player.finished.connect(_finish_film)
 	add_child(film_player)
-	if g.flags.get("epilogue_arrived", false) or not seen.is_empty():
+	if g.restoring_run:
+		phase = "walk"
+	elif g.flags.get("epilogue_arrived", false) or not seen.is_empty():
 		g.say("epilogue_wake", _to_walk)
 	else:
 		_start_film("return")

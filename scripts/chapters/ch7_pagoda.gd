@@ -61,6 +61,7 @@ var seen := {}
 var acc := 0.0
 var bt := 0.0                   # time inside phase
 var phase := 0
+var resume_battle := {}
 var boss_hp := 0.0
 var boss_pos := Vector2(720, 170)
 var boss_flash := 0.0
@@ -249,6 +250,8 @@ func act(id: String) -> void:
 			g.return_from_menu("title")
 		"settings":
 			g.overlay.open_settings()
+		"saves":
+			g.overlay.open_saves()
 		"to_map":
 			g.go("map")
 
@@ -317,6 +320,9 @@ func _start_phase(i: int, fresh := true) -> void:
 		g.say("boss_intro")
 	elif fresh and new_stage and stage() == 4:
 		g.say("boss_form2")
+	resume_battle = {"phase": phase, "lives": lives, "bombs": bombs, "score": score,
+		"graze": graze, "power": power, "points": points, "next_extend": next_extend,
+		"stage_points": stage_points, "rng_seed": rng.seed, "rng_state": rng.state}
 
 
 func _say(t: String, d := 3.0) -> void:
@@ -1985,5 +1991,6 @@ func _draw_pause() -> void:
 		_button("restart", Rect2(card.position.x + 40, 472, 360, 42), "重新开始本关", false, 15)
 		_button("menu_title", Rect2(card.position.x + 40, 524, 174, 42), "返回标题", false, 15)
 		_button("menu_map", Rect2(card.position.x + 226, 524, 174, 42), "返回舆图", false, 15)
-		_button("settings", Rect2(card.position.x + 40, 580, 360, 42), "行旅设置", false, 15)
+		_button("settings", Rect2(card.position.x + 40, 580, 174, 42), "行旅设置", false, 15)
+		_button("saves", Rect2(card.position.x + 226, 580, 174, 42), "保存 / 读取", false, 15)
 

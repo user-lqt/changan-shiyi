@@ -14,6 +14,8 @@ var toast_time := 0.0
 var ripples: Array[Vector3] = []
 var settings_ui: Control
 var settings_return := ""
+var manual_point := {}
+var saves_return := ""
 
 
 func reset() -> void:
@@ -41,6 +43,20 @@ func open_journal() -> void:
 
 func open_help() -> void:
 	_open("help")
+	g.remember_current()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func open_saves() -> void:
+	saves_return = panel
+	g.remember_current()
+	manual_point = g.unpack_resume(g.read_save(g.manual_path))
+	_open("saves")
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func open_confirm_new() -> void:
+	_open("confirm_new")
 
 
 func open_settings() -> void:
@@ -68,6 +84,9 @@ func _open(name: String) -> void:
 func close_panel() -> void:
 	var was := panel
 	panel = ""
+	if was == "saves":
+		panel = saves_return
+		saves_return = ""
 	if was == "settings":
 		_remove_settings()
 		g.stop_voice()
@@ -101,6 +120,10 @@ func key(event: InputEventKey) -> bool:
 		if event.keycode == KEY_ESCAPE:
 			close_panel()
 		return true
+	if panel in ["saves", "confirm_new"]:
+		if event.keycode == KEY_ESCAPE:
+			close_panel()
+		return true
 	if event.keycode in [KEY_ESCAPE, KEY_ENTER, KEY_SPACE, KEY_J, KEY_KP_ENTER]:
 		g.sfx("click")
 		close_panel()
@@ -129,6 +152,22 @@ func act(id: String) -> void:
 		g.restart_current_chapter()
 	elif id == "menu_settings":
 		open_settings()
+	elif id == "menu_saves":
+		open_saves()
+	elif id == "save_manual":
+		if g.save_manual():
+			manual_point = g.unpack_resume(g.read_save(g.manual_path))
+	elif id == "load_manual":
+		g.load_manual()
+	elif id == "load_auto":
+		var point: Dictionary = g.resume_point.duplicate(true)
+		if not point.is_empty():
+			g._prepare_chapter_exit()
+			g.continue_saved_game(point)
+	elif id == "confirm_new":
+		g.reset_progress()
+		g._prepare_chapter_exit()
+		g.go("prologue")
 	elif id == "g_sound":
 		g.toggle_sound()
 	elif id == "g_help":
@@ -177,6 +216,14 @@ func _draw_panel() -> void:
 	_panel(card)
 	_button("panel_close", Rect2(1036, 205, 56, 33), "关闭", false, 12)
 	match panel:
+		"confirm_new":
+			_t(Vector2(374, 244), "重新启程", 14, Pal.GOLD)
+			_title(Vector2(374, 318), "从故事开头重新开始？", 32, Pal.PAPER)
+			_serif_wrap(Vector2(375, 382), "本次自动进度将被覆盖，手动存档会保留。", 640, 19, Pal.SOFT, 32)
+			_button("panel_close", Rect2(375, 596, 320, 48), "取消", false, 18)
+			_button("confirm_new", Rect2(725, 596, 340, 48), "确认重新开始", true, 18)
+		"saves":
+			_draw_saves()
 		"card":
 			_draw_card()
 		"journal":
@@ -184,11 +231,12 @@ func _draw_panel() -> void:
 		"help":
 			_t(Vector2(374, 244), "行旅菜单  /  操作说明", 14, Pal.GOLD)
 			_title(Vector2(374, 303), "慢一点，观察每一处联系。", 32, Pal.PAPER)
-			_button("menu_settings", Rect2(895, 285, 170, 38), "行旅设置", false, 16)
+			_button("menu_settings", Rect2(895, 283, 170, 34), "行旅设置", false, 15)
+			_button("menu_saves", Rect2(895, 325, 170, 34), "保存 / 读取", false, 15)
 			var lines: Array = g.scene.help_lines() if g.scene else []
 			lines = lines + ["J 打开手札；H 获取提示（对话中查看历史）；Ctrl 快进。", "独立试玩：本次进度不写入主线存档。" if not g.preview_chapter.is_empty() else "进度自动保存在本机，可在标题页「重新开始」。"]
 			for i in range(lines.size()):
-				_t(Vector2(375, 358 + i * 40), str(lines[i]), 17, Pal.MUTED)
+				_t(Vector2(375, 387 + i * minf(28.0, 236.0 / maxf(1, lines.size()))), str(lines[i]), 15, Pal.MUTED)
 			if g.can_restart_chapter():
 				_button("menu_title", Rect2(375, 657, 160, 43), "返回标题", false, 15)
 				_button("menu_map", Rect2(550, 657, 160, 43), "返回舆图", false, 15)
@@ -199,6 +247,25 @@ func _draw_panel() -> void:
 				_button("menu_map", Rect2(610, 657, 210, 43), "返回舆图", false, 16)
 				_button("panel_close", Rect2(848, 657, 217, 43), "继续", true, 16)
 	draw_set_transform(Vector2.ZERO)
+
+
+func _draw_saves() -> void:
+	_t(Vector2(374, 244), "行旅存档  /  本机保存", 14, Pal.GOLD)
+	_title(Vector2(374, 303), "把旅程留在这里", 32, Pal.PAPER)
+	var points := [g.resume_point, manual_point]
+	for i in range(2):
+		var point: Dictionary = points[i]
+		var y := 336.0 + i * 137.0
+		_box(Rect2(375, y, 690, 121), Color(0.05, 0.075, 0.08, 0.88), 6, Color(Pal.GOLD, 0.32))
+		_t(Vector2(395, y + 28), "自动存档" if i == 0 else "手动存档", 16, Pal.GOLD)
+		_serif(Vector2(395, y + 58), g.SessionState.description(point), 19, Pal.PAPER)
+		if not point.is_empty():
+			var local_time := int(point.get("saved_at", 0)) + int(Time.get_time_zone_from_system()["bias"]) * 60
+			_t(Vector2(395, y + 89), Time.get_datetime_string_from_unix_time(local_time).replace("T", "  "), 13, Pal.MUTED)
+			_button("load_auto" if i == 0 else "load_manual", Rect2(914, y + 20, 130, 38), "读取", false, 16)
+		if i == 1 and g.screen in g.CHAPTERS and not g.transient_save:
+			_button("save_manual", Rect2(914, y + 68, 130, 38), "保存到此", true, 15)
+	_serif_wrap(Vector2(375, 639), "对话和演出从最近的操作节点接续；击鼓与战斗从准备阶段或本阶段起点继续。", 690, 15, Pal.MUTED, 23)
 
 
 func _draw_card() -> void:

@@ -4,11 +4,14 @@
 
 ```text
 godot --headless --path . -- --self-test
+godot --headless --path . -- --self-test-playtest
 godot --path . -- --ui-test
 godot --path . -- --ui-test-navigation
 ```
 
-第一条覆盖关卡逻辑，第二条检查实际视口交互，第三条检查导航、重玩和设置。使用本机 Godot 可执行文件替换 `godot`；验证模式使用临时进度。
+以上依次覆盖全流程逻辑、本轮试玩优化、实际视口交互，以及导航、重玩和设置。使用本机 Godot 可执行文件替换 `godot`；验证模式使用临时进度。
+
+`--self-test-playtest` 单独验证撤回、结算停留、存档读写与续玩，完整逻辑检查也包含这些检查。存档测试使用独立验证文件，不覆盖玩家的自动或手动存档。
 
 历史产物归入：
 

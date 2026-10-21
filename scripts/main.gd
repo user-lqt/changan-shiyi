@@ -7,6 +7,7 @@ const Story = preload("res://scripts/data/story.gd")
 const Dialogue = preload("res://scripts/core/dialogue.gd")
 const Overlay = preload("res://scripts/core/overlay.gd")
 const Tests = preload("res://scripts/core/tests.gd")
+const SessionState = preload("res://scripts/core/session_state.gd")
 const SCENES := {
 	"title": preload("res://scripts/chapters/title.gd"),
 	"codex": preload("res://scripts/chapters/codex.gd"),
@@ -23,7 +24,8 @@ const SCENES := {
 	"epilogue": preload("res://scripts/chapters/epilogue.gd"),
 }
 const SAVE_PATH := "user://changan_save.json"
-const SAVE_VERSION := 4
+const SAVE_VERSION := 5
+const MANUAL_SAVE_PATH := "user://changan_manual.json"
 const SETTINGS_PATH := "user://changan_settings.cfg"
 const SETTINGS_VERSION := 2
 const DEFAULT_SETTINGS := {"voice": 0.5, "music": 0.5, "effects": 0.5, "fullscreen": false, "text_speed": 1.0}
@@ -107,15 +109,24 @@ var capture_path := ""
 var capture_stage := ""
 var preview_chapter := ""
 var tester
+var playtest_runner
 var zun_mode := false
 var cheat_buffer := ""
 var cheat_time := 0.0
 var chapter_start := {}
 var restarting_chapter := false
 var settings := DEFAULT_SETTINGS.duplicate()
+var resume_point := {}
+var pending_resume := {}
+var restoring_run := false
+var snapshot_clock := 0.0
+var autosave_clock := 0.0
+var progress_path := SAVE_PATH
+var manual_path := MANUAL_SAVE_PATH
 
 
 func _ready() -> void:
+	get_tree().auto_accept_quit = false
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	face = load("res://assets/fonts/body-sc.ttf") as Font
 	prose = load("res://assets/fonts/display-sc.ttf") as Font
@@ -127,7 +138,7 @@ func _ready() -> void:
 		if ResourceLoader.exists(path):
 			tex[key] = load(path)
 	var args := OS.get_cmdline_user_args()
-	test_mode = args.has("--self-test") or args.has("--ui-test") or args.has("--ui-test-prologue") or args.has("--ui-test-tower") or args.has("--ui-test-epilogue") or args.has("--ui-test-navigation")
+	test_mode = args.has("--self-test") or args.has("--self-test-playtest") or args.has("--ui-test") or args.has("--ui-test-prologue") or args.has("--ui-test-tower") or args.has("--ui-test-epilogue") or args.has("--ui-test-navigation")
 	fast_dialogue = test_mode
 	transient_save = test_mode or args.has("--fresh")
 	for arg in args:
@@ -166,7 +177,10 @@ func _ready() -> void:
 		_switch(preview_chapter)
 	if test_mode or not capture_path.is_empty():
 		tester = Tests.new(self)      # keep a reference: RefCounted would be freed before the deferred call
-	if args.has("--ui-test-navigation"):
+	if args.has("--self-test-playtest"):
+		playtest_runner = preload("res://scripts/core/playtest_checks.gd").new(tester)
+		playtest_runner.run_and_finish.call_deferred()
+	elif args.has("--ui-test-navigation"):
 		tester.run_navigation_ui.call_deferred()
 	elif args.has("--ui-test-epilogue"):
 		tester.run_epilogue_ui.call_deferred()
@@ -287,6 +301,12 @@ func _prepare_chapter_exit() -> void:
 
 
 func _switch(name: String) -> void:
+	var restore_point: Dictionary = pending_resume.duplicate(true)
+	pending_resume = {}
+	if not restore_point.is_empty():
+		apply_progress(restore_point["progress"])
+	elif scene and not restoring_run:
+		remember_current()
 	dlg.cancel()
 	if scene:
 		remove_child(scene)
@@ -301,8 +321,19 @@ func _switch(name: String) -> void:
 	old_hover = ""
 	cheat_buffer = ""
 	chapter_start = {"flags": flags.duplicate(true), "shards": shards.duplicate(), "cleared": cleared.duplicate(true), "collected": collected.duplicate()} if name in CHAPTERS else {}
+	restoring_run = not restore_point.is_empty() and not restore_point.get("entry", false)
+	if name in CHAPTERS or name == "map":
+		resume_point = {"chapter": name, "state": {}, "progress": progress_data(), "entry_progress": chapter_start.duplicate(true),
+			"saved_at": Time.get_unix_time_from_system(), "entry": true}
 	scene.enter()
+	if restoring_run:
+		dlg.cancel()
+		SessionState.restore(self, restore_point)
+		resume_point = restore_point
+	restoring_run = false
 	restarting_chapter = false
+	if name in CHAPTERS or name == "map":
+		_save_progress()
 
 
 func story_event(name: String) -> void:
@@ -311,6 +342,8 @@ func story_event(name: String) -> void:
 
 
 func say(id: String, done := Callable()) -> void:
+	if restoring_run:
+		return
 	dlg.start(id, done)
 
 
@@ -386,6 +419,15 @@ func _process(delta: float) -> void:
 	overlay.age += delta
 	overlay.tick(delta, is_blocked)
 	overlay.queue_redraw()
+	if not transient_save:
+		snapshot_clock += delta
+		autosave_clock += delta
+		if snapshot_clock >= 0.5:
+			snapshot_clock = 0.0
+			remember_current()
+		if autosave_clock >= 5.0:
+			autosave_clock = 0.0
+			_save_progress()
 
 
 func _top_hit(pos: Vector2) -> String:
@@ -703,28 +745,83 @@ func _save_settings(path := SETTINGS_PATH) -> void:
 
 
 # ================================================================== save
-func _save_progress() -> void:
-	if transient_save:
+func progress_data() -> Dictionary:
+	return {"version": SAVE_VERSION, "flags": flags.duplicate(true), "shards": shards.duplicate(), "cleared": cleared.duplicate(true), "collected": collected.duplicate(),
+		"hints": hints_used, "time": play_time, "stats": stats.duplicate(true), "zun": zun_mode}
+
+
+func remember_current() -> void:
+	if restoring_run or not scene or scene.process_mode == Node.PROCESS_MODE_DISABLED:
 		return
-	var data := {"version": SAVE_VERSION, "flags": flags, "shards": shards, "cleared": cleared, "collected": collected,
-		"hints": hints_used, "time": play_time, "stats": stats, "zun": zun_mode}
-	var file := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
-	if file:
-		file.store_string(JSON.stringify(data))
+	var point: Dictionary = SessionState.capture(self)
+	if not point.is_empty():
+		resume_point = point
+	elif screen == "map":
+		resume_point = {"chapter": "map", "state": {}, "progress": progress_data(), "saved_at": Time.get_unix_time_from_system(), "entry": true}
+
+
+func _save_progress() -> void:
+	if transient_save or restoring_run:
+		return
+	remember_current()
+	write_save(progress_path)
+
+
+func write_save(path: String) -> bool:
+	var data := progress_data()
+	data["resume"] = Marshalls.raw_to_base64(var_to_bytes(resume_point))
+	data["saved_at"] = Time.get_unix_time_from_system()
+	var temp := path + ".tmp"
+	var file := FileAccess.open(temp, FileAccess.WRITE)
+	if not file:
+		return false
+	file.store_string(JSON.stringify(data))
+	file.close()
+	var absolute := ProjectSettings.globalize_path(path)
+	var backup := absolute + ".bak"
+	if FileAccess.file_exists(path):
+		if DirAccess.copy_absolute(absolute, backup) != OK:
+			return false
+	return DirAccess.rename_absolute(ProjectSettings.globalize_path(temp), absolute) == OK
+
+
+func read_save(path: String) -> Dictionary:
+	for candidate in [path, path + ".bak"]:
+		if not FileAccess.file_exists(candidate):
+			continue
+		var data = JSON.parse_string(FileAccess.get_file_as_string(candidate))
+		if data is Dictionary and int(data.get("version", 0)) in [3, 4, SAVE_VERSION] and data.get("flags") is Dictionary and data.get("cleared") is Dictionary:
+			return data
+	return {}
+
+
+func unpack_resume(data: Dictionary) -> Dictionary:
+	if not data.get("resume", "") is String or str(data.get("resume", "")).is_empty():
+		return {}
+	var bytes := Marshalls.base64_to_raw(str(data["resume"]))
+	if bytes.size() < 4:
+		return {}
+	var point = bytes_to_var(bytes)
+	if point is Dictionary and point.get("chapter", "") in SCENES and point.get("progress") is Dictionary and point.get("state") is Dictionary:
+		return point
+	return {}
 
 
 func _load_progress() -> void:
-	if not FileAccess.file_exists(SAVE_PATH):
+	var data := read_save(progress_path)
+	if data.is_empty():
 		return
-	var data = JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
-	if not data is Dictionary or not int(data.get("version", 0)) in [3, SAVE_VERSION]:
-		return
-	flags = data.get("flags", {})
-	cleared = data.get("cleared", {})
-	if int(data["version"]) == 3 and cleared.has("ch3"):
+	apply_progress(data)
+	resume_point = unpack_resume(data)
+
+
+func apply_progress(data: Dictionary) -> void:
+	flags = data.get("flags", {}).duplicate(true)
+	cleared = data.get("cleared", {}).duplicate(true)
+	if int(data.get("version", SAVE_VERSION)) == 3 and cleared.has("ch3"):
 		cleared.erase("ch3")         # v0.3 battle chapter is chapter 7 now
 		cleared["ch7"] = true
-	collected = data.get("collected", [])
+	collected = data.get("collected", []).duplicate()
 	hints_used = int(data.get("hints", 0))
 	play_time = float(data.get("time", 0.0))
 	zun_mode = bool(data.get("zun", false))
@@ -733,6 +830,7 @@ func _load_progress() -> void:
 		for i in range(4):
 			shards[i] = bool(s[i])
 	var st = data.get("stats", {})
+	stats = {"retries": 0, "credit_lost": 0, "lamp_refills": 0, "caught": 0}
 	if st is Dictionary:
 		for k in st:
 			stats[k] = st[k]
@@ -748,8 +846,53 @@ func reset_progress() -> void:
 	play_time = 0.0
 	stats = {"retries": 0, "credit_lost": 0, "lamp_refills": 0, "caught": 0}
 	zun_mode = false
+	resume_point = {}
+	pending_resume = {}
 	speech.stop()
+	if not transient_save:
+		write_save(progress_path)
+
+
+func continue_saved_game(point: Dictionary = {}) -> bool:
+	if point.is_empty():
+		point = resume_point
+	if point.is_empty():
+		return false
+	pending_resume = point.duplicate(true)
+	go(str(point["chapter"]))
+	return true
+
+
+func save_manual() -> bool:
+	if transient_save or screen not in CHAPTERS:
+		notify("请在正式旅程的关卡中保存。")
+		return false
+	remember_current()
+	var ok := write_save(manual_path)
+	notify("手动存档已保存。" if ok else "保存失败，请检查存档目录。")
+	return ok
+
+
+func load_manual() -> bool:
+	var data := read_save(manual_path)
+	var point := unpack_resume(data)
+	if point.is_empty():
+		notify("暂无可读取的手动存档。")
+		return false
+	if not pending.is_empty():
+		return false
+	_prepare_chapter_exit()
+	return continue_saved_game(point)
+
+
+func quit_game() -> void:
 	_save_progress()
+	get_tree().quit()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		quit_game()
 
 
 func has_progress() -> bool:

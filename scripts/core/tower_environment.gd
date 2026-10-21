@@ -70,12 +70,19 @@ func build(parent: Node3D, host) -> void:
 	sky_paint.sky_energy_multiplier = 0.55
 	sky_paint.ground_energy_multiplier = 0.32
 	sky.sky_material = sky_paint
+	if ResourceLoader.exists("res://assets/images/tower/changan_rooftops_ai.jpg"):
+		var city_sky := ShaderMaterial.new()
+		city_sky.shader = preload("res://scripts/shaders/tower_city_sky.gdshader")
+		city_sky.set_shader_parameter("city_view", load("res://assets/images/tower/changan_rooftops_ai.jpg"))
+		sky.sky_material = city_sky
+		settings.background_mode = Environment.BG_SKY
 	settings.sky = sky
 	settings.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
 	settings.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	settings.fog_enabled = true
 	settings.fog_light_color = Color("17212a")
 	settings.fog_density = 0.009
+	settings.fog_sky_affect = 0.08
 	env.environment = settings
 	world.add_child(env)
 	var moonlight := DirectionalLight3D.new()
@@ -593,19 +600,24 @@ func _build_bells(y: float) -> void:
 
 
 func _build_city() -> void:
-	var city_path := "res://assets/images/tower/changan_rooftops_ai.jpg"
-	if ResourceLoader.exists(city_path):
-		var panorama := MeshInstance3D.new()
-		var plane := QuadMesh.new()
-		plane.size = Vector2(120, 75)
-		panorama.mesh = plane
-		var paint := StandardMaterial3D.new()
-		paint.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		paint.albedo_texture = load(city_path)
-		panorama.material_override = paint
-		panorama.position = Vector3(0, 15, 64)
-		panorama.rotation.y = PI
-		world.add_child(panorama)
+	# Near roofs provide parallax below the windows; the skyline lives at infinity.
+	var roof_near := _material(Color("1b2b38"))
+	var wall_near := _material(Color("29323c"))
+	for row in range(3):
+		for col in range(7):
+			var x := (col - 3) * 5.7 + (row % 2) * 2.5
+			var z := 14.0 + row * 9.5
+			var roof_y := -1.3 - row * 0.8 + sin(col * 2.3 + row) * 0.35
+			_box(Vector3(x, roof_y - 1.0, z), Vector3(4.6, 2.0, 4.4), wall_near)
+			var roof := MeshInstance3D.new()
+			var mesh := PrismMesh.new()
+			mesh.size = Vector3(5.4, 1.2, 5.1)
+			roof.mesh = mesh
+			roof.material_override = roof_near
+			roof.position = Vector3(x, roof_y + 0.4, z)
+			roof.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			world.add_child(roof)
+			_box(Vector3(x + 0.4, roof_y - 0.25, z - 2.23), Vector3(0.48, 0.45, 0.035), materials["flame"])
 	var city_mat := _material(Color("2c333a"))
 	var roof_mat := _material(Color("212c35"))
 	for row in range(3):

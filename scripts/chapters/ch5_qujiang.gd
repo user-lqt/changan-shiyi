@@ -55,7 +55,7 @@ func enter() -> void:
 
 
 func chrome() -> bool:
-	return phase != "scoring"
+	return true
 
 
 func bottom_hud() -> bool:
@@ -539,9 +539,20 @@ func _animate_3d(delta: float) -> void:
 func tick(delta: float, blocked: bool) -> void:
 	_animate_3d(delta)
 	if phase == "scoring" and not blocked:
-		score_t += delta
-		if score_t >= STEP_TIME * (last.get("steps", []).size() + 2):
-			_after_scoring()
+		score_t = minf(score_t + delta, scoring_duration())
+
+
+func scoring_duration() -> float:
+	return STEP_TIME * (last.get("steps", []).size() + 2)
+
+
+func confirm_scoring() -> void:
+	if phase != "scoring":
+		return
+	if score_t < scoring_duration():
+		score_t = scoring_duration()
+	else:
+		_after_scoring()
 
 
 func key(event: InputEventKey) -> bool:
@@ -566,7 +577,7 @@ func key(event: InputEventKey) -> bool:
 			return true
 		"scoring":
 			if event.keycode in [KEY_ENTER, KEY_SPACE, KEY_KP_ENTER]:
-				score_t = 999.0
+				confirm_scoring()
 				return true
 	return false
 
@@ -590,6 +601,8 @@ func act(id: String) -> void:
 		choose(int(id.trim_prefix("offer_")))
 	else:
 		match id:
+			"score_continue":
+				confirm_scoring()
 			"play":
 				play_line()
 			"discard":
@@ -800,7 +813,9 @@ func _draw_scoring() -> void:
 		_t(Vector2(box.end.x - 16 - _tw(v, 14), y), v, 14, Pal.GOLD if v.contains("韵") else Color("9fd8ff"))
 	if shown > steps.size():
 		_tc(720, 746, "%d 墨  ×  %s 韵  =  %d" % [int(last["chips"]), _fmt(float(last["mult"])), int(last["total"])], 28, Pal.PAPER)
-	_tc(720, 870, "Enter 跳过", 11, Pal.MUTED)
+	var ready := score_t >= scoring_duration()
+	_button("score_continue", Rect2(610, 804, 220, 42), "继续  Enter / 空格" if ready else "立即显示全部", ready, 16)
+	_tc(720, 870, "结算会保留，确认后继续", 12, Pal.MUTED)
 
 
 func _draw_result(won: bool) -> void:

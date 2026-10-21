@@ -710,6 +710,8 @@ func run_logic() -> void:
 	await _frames(4)
 	_expect(g.cleared.has("finale"), "finale dialogue marks the chapter cleared")
 	_expect(g.screen == "epilogue", "finale leads to the epilogue")
+	var playtest_checks = preload("res://scripts/core/playtest_checks.gd").new(self)
+	await playtest_checks.run()
 	_finish("SELF_TEST")
 
 
@@ -1427,11 +1429,16 @@ func run_navigation_ui() -> void:
 	await _press_key(KEY_ESCAPE)
 	await _frames(4)
 	_expect(g.scene.paused and g.scene.hit_screen(Vector2(720, 490)) == "restart", "the battle pause panel also has a restart-current-chapter button")
-	await _click(Vector2(720, 601))
+	await _click(Vector2(627, 601))
 	await _frames(3)
 	_expect(g.overlay.panel == "settings" and g.scene.paused, "battle settings open without resuming combat")
 	await _press_key(KEY_ESCAPE)
 	_expect(g.overlay.panel.is_empty() and g.scene.paused, "closing battle settings restores the paused battle")
+	await _click(Vector2(813, 601))
+	await _frames(3)
+	_expect(g.overlay.panel == "saves" and g.scene.paused, "the battle save button opens without resuming combat")
+	await _press_key(KEY_ESCAPE)
+	_expect(g.overlay.panel.is_empty() and g.scene.paused, "closing battle saves returns to the paused battle")
 	await _click(Vector2(720, 490))
 	await _frames(3)
 	_expect(g.screen == "ch7" and g.scene.mode == "explore" and g.scene.read_stele, "battle restart returns to chapter entry and retains the tower clue")
@@ -1487,6 +1494,39 @@ func capture(path: String, stage: String) -> void:
 	match stage:
 		"title":
 			pass
+		"save_menu", "pause_save_menu", "night_shelter", "night_undo", "poetry_score_hold", "tower_window_low", "tower_window_high":
+			if stage in ["save_menu", "pause_save_menu", "night_shelter", "night_undo"]:
+				g._switch("ch4")
+				g.overlay.reset()
+				g.scene.state["p"] = Vector2i(5, 6)
+				g.scene._sync_3d(true)
+				if stage == "night_undo":
+					g.scene.do(Vector2i.ZERO)
+					g.scene.phase = "caught"
+				if stage in ["save_menu", "pause_save_menu"]:
+					g.remember_current()
+					if stage == "save_menu":
+						g._switch("title")
+					else:
+						g.overlay.open_help()
+					g.overlay.open_saves()
+					g.overlay.manual_point = g.resume_point.duplicate(true)
+			elif stage == "poetry_score_hold":
+				g._switch("ch5")
+				g.scene.choose(0)
+				g.scene.suggest()
+				g.test_mode = false
+				g.scene.play_line()
+				g.test_mode = true
+				g.scene.score_t = g.scene.scoring_duration()
+			else:
+				g._switch("ch6")
+				var level := 1 if stage == "tower_window_low" else 4
+				g.scene._land(level)
+				var y: float = level * g.scene.FLOOR_HEIGHT
+				g.scene.walker.position = Vector3(0.2, y + 0.05, 3.7)
+				g.scene.walker.face(Vector3(0.2, y - 0.5, 25.0))
+			g.overlay.toast_time = 0.0
 		"settings", "settings_pause":
 			if stage == "settings_pause":
 				g._switch("ch4")
@@ -1703,7 +1743,7 @@ func capture(path: String, stage: String) -> void:
 				close_cam.look_at(Vector3(26.6, 1.2, 12.2), Vector3.UP)
 				close_cam.make_current()
 			capture_delay = 1.2
-		"ch4", "ch4_mid", "ch4_over", "ch4_guide":
+		"ch4", "ch4_mid", "ch4_over", "ch4_guide", "ch4_high":
 			g._switch("ch4")
 			if stage == "ch4_guide":
 				g.scene.toggle_guide()
@@ -1713,10 +1753,13 @@ func capture(path: String, stage: String) -> void:
 				g.overlay.toast_time = 0.0
 			elif stage != "ch4":
 				var route: Array = g.scene.solve()
-				for i in range(28 if stage == "ch4_mid" else 0):
+				for i in range(28 if stage == "ch4_mid" else (12 if stage == "ch4_high" else 0)):
 					g.scene.do(route[i])
 					g.overlay.close_panel()
 				g.scene.force_overview = stage == "ch4_over"
+				if stage == "ch4_high":
+					g.scene._sync_3d(true)
+					g.overlay.toast_time = 0.0
 		"ch5", "ch5_play", "ch5_score", "ch5_shop":
 			g._switch("ch5")
 			g.overlay.close_panel()
@@ -1821,11 +1864,21 @@ func capture(path: String, stage: String) -> void:
 				g.scene._drop(Vector2(640, 520), "P", false)
 				g.scene._drop(Vector2(700, 540), "pt", false)
 				g.scene._drop(Vector2(760, 520), "bomb", false)
-		"finale":
+		"finale", "finale_done":
 			g.shards = [true, true, true, true]
 			g._switch("finale")
-			g.scene.pieces[2]["rot"] = 0.0
-			g.scene.drop(2, g.scene.target(2))
+			if stage == "finale_done":
+				# All four shards placed; the gold seams draw in during the hold.
+				# Set the state directly so the closing dialogue and card do not cover the bowl.
+				for i in range(4):
+					g.scene.pieces[i]["rot"] = 0.0
+					g.scene.pieces[i]["pos"] = g.scene.target(i)
+					g.scene.pieces[i]["placed"] = true
+				g.scene.done = true
+				g.dlg.active = false
+			else:
+				g.scene.pieces[2]["rot"] = 0.0
+				g.scene.drop(2, g.scene.target(2))
 		"epilogue_window", "epilogue_window_close", "epilogue_window_left", "epilogue_window_right", "epilogue_window_end":
 			g.flags["epilogue_arrived"] = true
 			g.flags["epilogue_seen"] = {"screen": true, "bowl": true, "mirror": true}
@@ -1876,7 +1929,8 @@ func capture(path: String, stage: String) -> void:
 			await g.get_tree().create_timer(1.0 / 30.0).timeout
 		# Compress after recording; PNG encoding must not slow the animation clock.
 		for i in range(recorded_frames.size()):
-			recorded_frames[i].resize(960, 600, Image.INTERPOLATE_LANCZOS)
+			if not OS.get_cmdline_user_args().has("--full"):
+				recorded_frames[i].resize(960, 600, Image.INTERPOLATE_LANCZOS)
 			var frame_result: int = recorded_frames[i].save_png(folder.path_join("%03d.png" % i))
 			if frame_result != OK:
 				print("CAPTURE_FRAME_ERROR: ", frame_result)
@@ -1886,6 +1940,39 @@ func capture(path: String, stage: String) -> void:
 		timing.store_string(JSON.stringify({"frame_times_ms": frame_times}))
 	else:
 		await g.get_tree().create_timer(capture_delay).timeout
+	# Trailer shots: --hold=seconds keeps the staged scene running (record with --write-movie).
+	var hold := 0.0
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--hold="):
+			hold = float(arg.trim_prefix("--hold="))
+	if hold > 0.0:
+		var user_args := OS.get_cmdline_user_args()
+		# --rephase replays the current battle phase so its spell cut-in lands on camera;
+		# --auto lets first-person scenes walk their guide route.
+		if user_args.has("--rephase") and g.scene.has_method("_start_phase"):
+			g.scene._start_phase(g.scene.phase, false)
+		if user_args.has("--auto") and g.scene.has_method("toggle_auto"):
+			g.scene.toggle_auto()
+		# --walk=seconds steps the night-street solution route at that interval (gameplay camera).
+		var walk := 0.0
+		for arg in user_args:
+			if arg.begins_with("--walk="):
+				walk = float(arg.trim_prefix("--walk="))
+		var walk_route: Array = g.scene.solve() if walk > 0.0 and g.scene.has_method("solve") else []
+		var next_step := 0.6
+		var t := 0.0
+		while t < hold:
+			await g.get_tree().process_frame
+			t += g.get_process_delta_time()
+			if not walk_route.is_empty() and t >= next_step:
+				next_step += walk
+				g.scene.do(walk_route.pop_front())
+				g.overlay.close_panel()
+				g.overlay.toast_time = 0.0
+			if "invuln" in g.scene:
+				g.scene.invuln = 9.0
+		g.get_tree().quit(0)
+		return
 	await RenderingServer.frame_post_draw
 	var result: int = g.get_viewport().get_texture().get_image().save_png(path)
 	print("CAPTURE_RESULT: ", result)

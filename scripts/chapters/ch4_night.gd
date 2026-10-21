@@ -8,14 +8,14 @@ extends "res://scripts/core/canvas.gd"
 const MAP := [
 	"###.####.###..###.####.###",
 	"###.####.###..###.####.###",
-	"...............C..........",
+	"...........D...C..........",
 	"###.#~##.###..###.####.###",
 	"###.#~##.###..###.####.###",
 	"###.#~##.##D..###.####.###",
 	"S....~....C...............",
 	"###.#~##.###..###.####.###",
 	"###.#~##.###..###.####.###",
-	"###.#~##.###..###.D###.###",
+	"###.#~##.###..###.D####D##",
 	".....~~~............C.....",
 	"######################G###",
 	"######################...E",
@@ -47,6 +47,9 @@ var aiming := false
 var caught_count := 0
 var phase := "play"              # play | caught | done
 var checkpoint := {}
+var undo_stack: Array = []
+var scout_nodes: Array = []
+var shelter_ring: MeshInstance3D
 var trail: Array = []            # recent route, retained for corner-aware companion placement
 var flash := 0.0
 var drum := 0.0
@@ -358,6 +361,10 @@ func do(action) -> void:
 	if not r["ok"]:
 		g.sfx("error", -14)
 		return
+	undo_stack.append({"state": state.duplicate(true), "trail": trail.duplicate(),
+		"seen": seen_lore.duplicate(), "collected": g.collected.duplicate(), "caught": caught_count})
+	if undo_stack.size() > DAWN:
+		undo_stack.pop_front()
 	var before: Vector2i = state["p"]
 	state = r["state"]
 	if action is Dictionary:
@@ -386,7 +393,7 @@ func do(action) -> void:
 		_win()
 	elif state["t"] >= DAWN:
 		phase = "caught"
-		g.say("ch4_dawn", _restart_checkpoint)
+		g.say("ch4_dawn")
 
 
 func _check_tile() -> void:
@@ -394,6 +401,7 @@ func _check_tile() -> void:
 	if p.x >= 13 and not checkpoint.get("mid", false):
 		checkpoint = state.duplicate(true)
 		checkpoint["mid"] = true
+		undo_stack.clear()
 		g.notify("过了朱雀大街。阿拾：「被抓的话，从这里重新来。」", 5)
 	for id in LORE_TILES:
 		if LORE_TILES[id] == p and not seen_lore.has(id):
@@ -407,7 +415,28 @@ func _caught() -> void:
 	g.stats["caught"] = int(g.stats.get("caught", 0)) + 1
 	g.sfx("objection")
 	flash = 1.0
-	g.say("ch4_caught", _restart_checkpoint)
+	g.say("ch4_caught")
+
+
+func undo_step() -> bool:
+	if phase not in ["play", "caught"] or g.blocked() or undo_stack.is_empty():
+		return false
+	var saved: Dictionary = undo_stack.pop_back()
+	state = saved["state"].duplicate(true)
+	trail = saved["trail"].duplicate()
+	seen_lore = saved["seen"].duplicate()
+	g.collected = saved["collected"].duplicate()
+	var removed := caught_count - int(saved["caught"])
+	g.stats["caught"] = maxi(0, int(g.stats.get("caught", 0)) - removed)
+	caught_count = int(saved["caught"])
+	phase = "play"
+	aiming = false
+	flash = 0.0
+	drum = 0.0
+	_sync_3d(true)
+	_refresh_guide()
+	g.sfx("dial", -12)
+	return true
 
 
 func _restart_checkpoint() -> void:
@@ -416,6 +445,8 @@ func _restart_checkpoint() -> void:
 	if checkpoint.get("mid", false):
 		state["mid"] = true
 	trail = []
+	undo_stack.clear()
+	aiming = false
 	phase = "play"
 	_sync_3d(true)
 	_refresh_guide()
@@ -645,6 +676,14 @@ func _build_3d() -> void:
 	_build_temple_approach()
 	batch_stats = preload("res://scripts/core/night_batch.gd").combine(world, _static_roots)
 	_static_roots.clear()
+	# Reuse six lightweight markers; scouting never adds per-frame meshes.
+	var scout_mat := _flat(Color("e4d7a1"), 0.0, 0.38)
+	for i in range(guards.size()):
+		var marker := _quad(Vector2i.ZERO, 0.055, scout_mat, 0.55)
+		marker.visible = false
+		scout_nodes.append(marker)
+	shelter_ring = _quad(Vector2i.ZERO, 0.045, _flat(Color("57d9b0"), 0.0, 0.3), 0.96)
+	shelter_ring.visible = false
 
 
 func _build_temple_approach() -> void:
@@ -845,6 +884,17 @@ func _sync_3d(snap: bool) -> void:
 			danger_cache[v] = true
 	for k in range(used, vis_pool.size()):
 		vis_pool[k].visible = false
+	if shelter_ring:
+		var sheltered := hidden(state["p"]) and phase == "play"
+		shelter_ring.visible = sheltered
+		shelter_ring.position = _v3(state["p"], 0.045)
+		var forecast: Dictionary = simulate(state, Vector2i.ZERO)["state"]
+		for i in range(scout_nodes.size()):
+			var next_pose: Array = pose(i, forecast["gs"])
+			var near: bool = (next_pose[0] as Vector2i).distance_to(state["p"]) <= 7.0
+			scout_nodes[i].visible = sheltered and near
+			scout_nodes[i].position = _v3(next_pose[0], 0.055)
+			scout_nodes[i].rotation.y = yaw_of(next_pose[1])
 	if snap:
 		su_node.position = _v3(state["p"])
 		ashi_node.position = _companion_target()
@@ -909,6 +959,8 @@ func _follow_companion(delta: float) -> void:
 func _animate(delta: float) -> void:
 	if not world:
 		return
+	if shelter_ring and shelter_ring.visible:
+		shelter_ring.scale = Vector3.ONE * (0.97 + 0.03 * sin(age * 2.8))
 	var k := 1.0 - exp(-delta * 12.0)
 	for gd in guards:
 		var n: Node3D = gd["node"]
@@ -1006,7 +1058,15 @@ func tick(delta: float, _blocked: bool) -> void:
 
 
 func key(event: InputEventKey) -> bool:
-	if phase != "play" or g.blocked():
+	if g.blocked():
+		return false
+	if event.keycode == KEY_Z:
+		undo_step()
+		return true
+	if phase == "caught" and event.keycode == KEY_R:
+		_restart_checkpoint()
+		return true
+	if phase != "play":
 		return false
 	match event.keycode:
 		KEY_W, KEY_UP:
@@ -1054,6 +1114,8 @@ func act(id: String) -> void:
 	if _common_act(id):
 		return
 	match id:
+		"undo":
+			undo_step()
 		"wait":
 			do(Vector2i.ZERO)
 		"stone":
@@ -1071,11 +1133,11 @@ func act(id: String) -> void:
 func help_lines() -> Array:
 	return ["WASD / 方向键走一步，空格原地等一回合。每走一步，金吾卫也走一步。",
 		"红色地块是金吾卫的视线：暗处只看 3 格，灯笼下能看 5 格。墙会挡住视线。",
-		"水渠、货车、门洞（绿色）里不会被看见，但别和金吾卫撞在同一格。",
+		"绿色藏身处可避开视线；淡金标记预告附近守卫下一步，不能与守卫同格。",
 		"阿拾会自动跟在身后，他不会被金吾卫发现，不用管他的位置。",
 		"卡住了？按 G 打开攻略模式：地上的金色脚印是安全路线，右上角告诉你下一步按什么。",
 		"Q 进入投石，点击 4 格内的地面：附近的金吾卫会转头看 3 回合。右键取消。",
-		"守夜人交接时短开送柴侧栅，每 %d 回合切换开关。按住 Tab 看全图，R 回到存档点。" % GATE_PERIOD]
+		"Z 撤回一步；R 回检查点；Tab 看全图。侧栅每 %d 回合开关一次。" % GATE_PERIOD]
 
 
 func journal_lines() -> Array:
@@ -1137,16 +1199,25 @@ func _draw_night_hud() -> void:
 	_box(dr, Color(0.02, 0.03, 0.035, 0.66), 20, Color(1, 0.8, 0.4, 0.25 + drum * 0.7))
 	_tc(720, 56, "鼓 · %d 回合后侧栅%s" % [left, "关" if open else "开"], 15, Color(1, 0.84, 0.5, 0.75 + drum * 0.25))
 	if hidden(state["p"]):
-		_box(Rect2(660, 80, 120, 30), Color(0.1, 0.35, 0.28, 0.85), 15)
-		_tc(720, 101, "藏身中", 14, Pal.PAPER)
+		_box(Rect2(530, 80, 380, 34), Color(0.1, 0.35, 0.28, 0.85), 15)
+		_tc(720, 103, "已隐蔽 · 淡金标记为守卫下一步", 15, Pal.PAPER)
 	if aiming:
 		_tc(720, 800, "投石：点击 4 格内的地面（右键取消）", 15, Color("9fd8ff"))
 	if g.blocked():
+		return
+	if phase == "caught":
+		_box(Rect2(460, 338, 520, 190), Color(0.02, 0.035, 0.04, 0.94), 8, Pal.GOLD)
+		_title_center(720, 392, "重新寻一条路", 32, Pal.PAPER)
+		if not undo_stack.is_empty():
+			_button("undo", Rect2(500, 446, 210, 46), "撤回一步  Z", true, 17)
+		_button("retry", Rect2(730, 446, 210, 46), "回检查点  R", false, 17)
 		return
 	_button("guide", Rect2(1238, 260, 170, 36), "关闭攻略  G" if guiding() else "攻略模式  G", guiding(), 14)
 	if guiding():
 		_draw_guide()
 	_button("wait", Rect2(1098, 744, 150, 42), "等待  空格", false, 14)
+	if phase == "play":
+		_button("undo", Rect2(938, 744, 150, 42), "撤回一步  Z", false, 14, not undo_stack.is_empty())
 	_button("retry", Rect2(1258, 744, 150, 42), "回存档点  R", false, 14)
 	if phase == "done":
 		_button("to_map", Rect2(1196, 690, 212, 44), "前往曲江  ›", true, 15)

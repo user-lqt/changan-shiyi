@@ -17,7 +17,7 @@ func chrome() -> bool:
 
 
 func help_lines() -> Array:
-	return ["点击「开始」进入故事；已有进度时可「继续」回到长安舆图。", "舆图依次解锁目的地；已完成的章节可以重玩。", "借光解谜 → 西市对质 → 胡旋击鼓 → 3D 夜行 → 曲江诗牌 → 塔顶弹幕 → 拼合修复。"]
+	return ["点击「开始」进入故事；「继续旅程」接续最近自动存档。", "行旅存档可读取手动进度；舆图中的已完成章节可以重玩。", "借光解谜 → 西市对质 → 胡旋击鼓 → 3D 夜行 → 曲江诗牌 → 塔顶弹幕 → 拼合修复。"]
 
 
 func key(event: InputEventKey) -> bool:
@@ -30,18 +30,23 @@ func key(event: InputEventKey) -> bool:
 func act(id: String) -> void:
 	match id:
 		"start":
+			if g.continue_saved_game():
+				return
 			if g.cleared.has("finale") and not g.cleared.has("epilogue"):
 				g.go("epilogue")
 			else:
 				g.go("map" if g.has_progress() else "prologue")
 		"new":
-			g.reset_progress()
-			g.go("prologue")
+			g.overlay.open_confirm_new()
 		"codex":
 			if g.codex_unlocked():
 				g.go("codex")
 		"settings":
 			g.overlay.open_settings()
+		"saves":
+			g.overlay.open_saves()
+		"quit":
+			g.quit_game()
 
 
 func _draw() -> void:
@@ -66,11 +71,13 @@ func _draw() -> void:
 	_title(Vector2(124, 330), "长安拾遗", 96, Pal.PAPER)
 	_serif(Vector2(132, 390), "借一束光，找回长安。", 28, Color(Pal.PAPER, 0.95))
 	_serif_wrap(Vector2(132, 438), "数字修复师苏晴在扫描一面唐代铜镜时，被镜光带回了千年前的长安。一只碎成四片的越窑莲纹碗，是她回家的唯一线索。", 600, 18, Pal.SOFT, 32)
-	var cont: bool = g.has_progress()
+	var cont: bool = g.has_progress() or not g.resume_point.is_empty()
 	_button("start", Rect2(132, 566, 240, 51), "继续旅程" if cont else "开始", true, 19)
 	if cont:
 		_button("new", Rect2(392, 566, 160, 51), "重新开始", false, 16)
 	_button("settings", Rect2(132, 784, 200, 46), "行旅设置", false, 18)
+	_button("saves", Rect2(348, 784, 180, 46), "行旅存档", false, 18)
+	_button("quit", Rect2(544, 784, 180, 46), "退出游戏", false, 18)
 	if g.codex_unlocked():
 		_button("codex", Rect2(132, 642, 420, 64), "长安拾遗录  ·  人物与文化图鉴", false, 19)
 		_serif(Vector2(147, 733), "人间风物，留在这一卷长安。", 17, Pal.GOLD)
